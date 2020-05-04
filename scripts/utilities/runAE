@@ -1,0 +1,111 @@
+#!/bin/env bash
+#
+################################################################################
+##
+## File Name   : runAE
+## Description : Run a App Engine Program on the server.
+## Author      : Nate Werner
+## Created     : 4/19/2020
+################################################################################
+## Syntax      : runAE -a <app> -e <env> -p <AE program> -b
+##
+## Parameters  : -a <app>  : (Required)Target app to run DMS script
+##             : -e <env>  : (Required)Target env to run DMS Script
+##             : -p <program> : AE Engine program to run
+##             : -r <runcontrl> : (optional) Run Control Name
+##
+## Example     : runAE -a cs -e dev -p VERSION -r pssa
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+
+app=""
+env=""
+aeProgram=""
+runControl=""
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "   runAE -a <app> -e <env> -p <AE PRogram> -b"
+   echo "     Run an app engine program "
+   echo "     -a <app>  : (Required) App to run DMS script"
+   echo "     -e <env>  : (Required) Env to run DMS Script"
+   echo "     -p <prog> : (Required) AE Program to run"
+   echo "     -r <runcontrl> : (optional) Run Control Name"
+   echo "     -h        : Display this help"
+   echo
+   echo "Sample: runAE -a cs -e dev -p VERSION -r pssa"
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":ha:e:p:r:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "p")
+        aeProgram=$OPTARG
+        ;;
+      "r")
+        runControl=$OPTARG
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+# verifiy required fields
+if [[ -z "$app" ]]; then
+  echo "App is required."
+  usageInfo
+fi
+
+if [[ -z "$env" ]]; then
+  echo "Environment is required."
+  usageInfo
+fi
+
+if [[ -z "$aeProgram" ]]; then
+  echo "AE PRogram is required."
+  usageInfo
+fi
+
+# setup log file for process
+currentDate="$(date +%y%m%d_%H%M )"
+aeLogFile="$PS_SCRIPT_BASE/logs/utilites/runAE_${app}_${env}_${aeProgram}_$currentDate.log"
+util::setLogFile "$aeLogFile"
+
+util::runAE "$app" "$env" "$aeProgram" "$runControl"
+
+#END

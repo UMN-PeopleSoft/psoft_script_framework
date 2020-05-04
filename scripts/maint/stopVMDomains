@@ -1,0 +1,155 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : stopVMDomains
+## Description : Stop PeopleSoft domains on a specific host. Will include additional
+##               steps like, web pool member in OTD,
+##               verify proper stutdown of processes.
+## Author      : Nate Werner
+## Created     : 1/12/2018
+## Updated     :
+################################################################################
+## Syntax      : stopVMDomains -d <HostName> [-v] [-h]
+## Parameters  : -d <HostName>  : Specific Host Name
+##             : -e <env code>  : Filter by environment
+##    Defaults : stop Coherence cache server, force stop
+## Example     : stopVMDomains -d psapp-prd01
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+hostName=""
+majorToolsVer=""
+# turn off all optional features by default
+debugFlag="n"
+declare -A domAttribs
+domainList=()
+exitCode=0
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  stopVMDomains -d <hostName> [-v] [-h]"
+   echo "     Stop all domains on a specific Host."
+   echo " Parameters"
+   echo "     -d <hostName>    : (Required) Hostname to stop domains."
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: stopVMDomains -d psapp-tst01"
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":vhd:" optname; do
+    case "$optname" in
+      "d")
+        hostName=$OPTARG
+        ;;
+      "v")
+        debugFlag="y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ -z "$hostName" ]]; then
+  echo "Host Name is required."
+  usageInfo
+fi
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/stopVMDomains_${hostName}_$currentDate.log"
+util::setLogFile "$maintLogFile"
+util::log "DEBUG" "****Starting stopVMDomains for ${hostName}"
+
+# get array of domains by Host Name
+util::log "DEBUG" "Calling domain::getDomainsByHost $hostName"
+inventory::getDomainsByHost "$hostName" "" domainList
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Invalid hostName selected (domain::getDomainsByHost)"
+  exit 1
+else
+  util::log "INFO" "****Initiating shutdown for $hostName"
+
+  # setup vault access
+  export ANSIBLE_LOG_PATH=/dev/null
+  sec::getandStoreVaultAccess
+  if [[ $? -ne 0 ]]; then
+    util::log "ERROR" "Unable to setup vault access"
+    exit 1
+  fi
+
+  # Create list of parameters from domain list for stopDomain
+  for domain in ${domainList[@]}; do
+    majorToolsVer=$( inventory::getCurrentTools "$domain")
+    #                                                      clearCache stopCoherence forceStop
+    domainParameters="${domainParameters}${domain} ${majorToolsVer} "0" "1" "1" ${debugFlag} ${maintLogFile} "
+  done
+  util::log "DEBUG" "stopVMDomains: Domain Parms: ${domainParameters}"
+
+  # make parallel parse the parameters with field speparator of space
+  IFS=' '
+  ## Now fire off commands in parallel, each command having 7 parameters
+  util::log "DEBUG" "Calling parallel -j 4 -n 7 --joblog jlog_${hostName} --line-buffer maint::stopDomain {1} {2} {3} {4} {5} {6} {7}"
+  parallel -j 88888888 -n 7 --joblog jlog_${hostName} --line-buffer maint::stopDomain {1} {2} {3} {4} {5} {6} {7} ::: $domainParameters
+  parallelExit=$?
+  if [[ $parallelExit -ne 0 ]]; then
+    util::log "ERROR" "Parallel command failed with exit code: $parallelExit , out of space/memory?"
+  fi
+  util::log "DEBUG" "Parallel command log output: "
+  cat jlog_${app}${env} >> $maintLogFile
+
+  IFS=$'\n'
+  # Check parallel job log (jlog) for any errors
+  errorList=( $( grep -v '0'$'\t''0' jlog_${hostName} | grep -v JobRuntime ) )
+  if [[ -n "$errorList" ]]; then
+    for process in ${errorList[@]}; do
+       failedCommand=$( echo $process | awk -F' ' '{ print $9" "$10" "$11 }' )
+       echo "*******"
+       util::log "ERROR" "The parallel command for \"$failedCommand\" did not run to success, check logs"
+       echo "*******"
+       exitCode=1
+    done
+  fi
+
+  echo
+  util::log "INFO" "****Completed shutdown for $hostName"
+
+  #remove log file
+  rm -f jlog_${hostName}
+fi
+
+util::log "DEBUG" "****Completed stopVMDomains for ${app}${env}"
+util::log "INFO" "Details of the stopVMDomains operation can be found in $maintLogFile"
+exit ${exitCode}
+#END

@@ -1,0 +1,136 @@
+#!/bin/env bash
+#
+################################################################################
+##
+## File Name   : syncAppFilesfromGold
+## Description : Sync App Files to local disk VMs from Gold source for specific app/env
+##                  Includes: /psoft/apps /psoft/appscust
+## Author      : Nate Werner
+## Created     : 02/15/2020
+################################################################################
+## Syntax      : syncAppFilesfromGold -a <app> -e <env>
+##
+## Parameters  : -a <app>  : Target app to sync files for
+##             : -e <env>  : Target env for file sync
+##             :
+## Example     : syncAppFilesfromGold -a cs -d dev
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+
+app=""
+env=""
+sourceAppBase="/psoft/admin/gold/apps"
+sourceAppCustBase="/psoft/admin/gold/appscust"
+targetAppBase="/psoft/apps"
+targetAppCustBase="/psoft/appscust"
+
+declare -a hostList
+# Use SSH_CMD from maint config vars (no host key checking)
+SSH_OPTIONS="${SSH_CMD} -o PreferredAuthentications=publickey"
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  syncAppFiles -a <app> -e <env>"
+   echo "     Sync the app, cust to all VM's local disks running App/Env"
+   echo "     -a <app>  : (Required) App"
+   echo "     -e <env>  : (Required) Env"
+   echo "     -d <dbname> : DB Name from STAT"
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: syncAppFiles -a cs -e dev"
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":ha:e:d:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "d")
+        dbName=$OPTARG
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+# verifiy required fields
+if [[ -z "$env" && -z "$app" && -z $dbName ]]; then
+  echo "Environment or DB Name is required."
+  usageInfo
+fi
+
+# Script will support STAT imput of DBName, but converts to normal app/env
+if [ -n "$dbName" ]; then
+  dbName=${dbName,,}
+
+  app="${dbName:0:2}"
+  env="${dbName:2:3}"
+fi
+
+# setup log file for process
+currentDate="$(date +%y%m%d_%H%M )"
+syncLogFile="${PS_SCRIPT_BASE}logs/migration/syncAppFilesfromGold_${app}_${env}_$currentDate.log"
+util::setLogFile "$syncLogFile"
+
+# Get all hosts the app env is running on
+inventory::getHostsbyAppEnv "$app" "$env" hostList
+stringList="${hostList[@]}"
+util::log "DEBUG" "Syncing apps for hosts: $stringList"
+
+util::log "INFO" "Starting parallel sync of apps and appscust files for ${app}${env}"
+
+# Sync all "apps" and "appscust" files
+parallelCommandList=""
+
+util::log "INFO" "Synching files to $stringList"
+for eachHost in ${hostList[@]}; do
+  parallelCommandList="${parallelCommandList}${eachHost} rsync -aL --delete $sourceAppBase/${app}${env}  $targetAppBase/ "
+  parallelCommandList="${parallelCommandList}${eachHost} rsync -aL --delete $sourceAppCustBase/${app}${env} $targetAppCustBase/ "
+done
+
+IFS=' '
+rsyncOutput=$( parallel -j 3 -n 6 --line-buffer $SSH_OPTIONS {1} "{2} {3} {4} {5} {6}" ::: $parallelCommandList )
+resultCode=$?
+if [[ $resultCode != 0 ]]; then
+  util::log "ERROR" "Parallel call to rsync 'apps' and 'appscust' files failed with exit code: $resultCode, Output: ${rsyncOutput}"
+  exit 1
+else
+  util::log "DEBUG" "Parallel rsync results: $rsyncOutput"
+fi
+
+util::log "INFO" "Completed parallel sync of apps and appscust files for ${app}${env}"
+util::log "INFO" "Sync process completed"
+
+#END

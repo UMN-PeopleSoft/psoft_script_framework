@@ -1,0 +1,2 @@
+  } elseif { [HTTP::uri] starts_with "/psoft" } {
+     pool pssa_web

@@ -1,0 +1,219 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : updateAppEnv
+## Description : update a web/app/sched app/env using ansible to capture any config changes
+## Author      : Nate Werner
+## Created     : 2/22/2018
+##
+################################################################################
+##
+## Syntax      : updateAppEnv -a <App Code> -e <Env Code> -y <Dom Type> -v -s -b -h
+## Parameters  : -a <App Code>  : (required) 2 char app code: cs, fs, hr, ih
+##               -e <Env Code>  : (required) 3 char env code: dev,tst,qat,prd,per,fix,upg,trn,cls,dmo,dmn,umn,tec
+##               -y <Dom Type>  : (optional) app, web, prc, or all for all types, default = all
+##               -v             : Enable ansible debug/verbose mode
+##               -s             : Use Serial mode. Changes are applied one domain at a time (rolling updates).
+##                                Default = parallel (all domains at once)
+##               -b             : Boot domains after updateing. Use -s and -b for rolling update without interuption to users.
+##               -h             : Display this help.
+## Example     : updateAppEnv.sh -a cs -e dev -y web
+##
+################################################################################
+
+### Help Instructions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  updateAppEnv update config on all domains in an application/environment from any location,"
+   echo "     using an ansible playbook. Applies to current domain version"
+   echo " Parameters"
+   echo "     -a <App Code>  : (Required) 2 char app code: cs, fs, hr, ih"
+   echo "     -e <Env Code>  : (Required) 3 char env code: dev,tst,qat,prd,per,fix,upg,trn,cls,dmo,dmn,umn,tec"
+   echo "     -y <Dom Type>  : (Optional) app, web, prc, appweb, or all for all types, default = all"
+   echo "     -u <purpose>     : (Optional) main, ib, ren, trace"
+   echo "     -v             : Enable ansible debug/verbose mode."
+   echo "     -s             : Use Single/Serial mode. Changes are applied one domain at a time (rolling updates)."
+   echo "                        Default = parallel by hosts"
+   echo "     -b             : Boot domains after updateing.  Use -s and -b for rolling update without interruption to users."
+   echo "     -h             : Display this help"
+   echo
+   echo "Sample: updateAppEnv.sh -a cs -e dev -y web -b"
+   echo
+   exit 1
+}
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+source $LIB_HOME/ansible.sh
+
+##### Variable and defaults
+# Set in bootstrap:
+#   ANSIBLE_HOME
+#   DOMAIN_LIST
+#   MAINT_HOME
+#   SCRIPT_HOME
+
+playbookFile="update_appenv.yml"
+debugFlag=""
+app=""
+env=""
+domainType=""
+bootDomain=""
+declare -a domainList
+bootVar=""
+serialFlag=""
+extraVars=""
+fullToolsVer=""
+majorToolsVer=""
+purpose=""
+
+##### Prompt processing and validation
+while getopts "hvbsa:e:y:u:" optname
+  do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "y")
+        domainType=$OPTARG
+        ;;
+      "u")
+        purpose=$OPTARG
+        ;;
+      "s")
+        serialFlag="1"
+        ;;
+      "b")
+        bootDomain="True"
+        ;;
+      "v")
+        debugFlag="-vvv"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+  done
+
+### Main
+
+# Calculate run duration
+bash_start=$(date +%s)
+currentDate="$(date +%y%m%d_%H%M )"
+# standard logging
+updateLogFile="${PS_SCRIPT_BASE}logs/maint/updateAppEnv_${app}${env}_$currentDate.log"
+util::setLogFile "$updateLogFile"
+stringList="$@"
+util::log "DEBUG" "****Running $stringList"
+
+# verifiy required fields
+if [[ -z "$app" || -z "$env" ]]; then
+  util::log "ERROR" "App Code and Env Code is required."
+  usageInfo
+fi
+
+if [ "$domainType" == "all" ]; then
+   domainType=""
+fi
+
+fullToolsVer=$( inventory::getCurrentToolsAppEnv "$app" "$env" "$domainType")
+util::log "DEBUG" "updateAppEnv: Selected tools version: $fullToolsVer"
+majorToolsVer="${fullToolsVer:0:4}"
+
+#### Update and check domain list
+echo
+util::log "INFO" "Re-syncing domain list..."
+if [ -n "$domaintType" ]; then
+  $MAINT_HOME/syncDomainList -a $app -e $env -y $domainType
+else
+  $MAINT_HOME/syncDomainList -a $app -e $env
+fi
+util::log "INFO" "Sync Completed"
+echo
+
+# get array of domains in app/env
+inventory::getDomainsByEnv "$app" "$env" "$domainType" "$purpose" "$majorToolsVer" domainList
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Invalid app/env selected (domain::getDomainsByEnv)"
+  exit 1
+fi
+stringList="${domainList[@]}"
+util::log "DEBUG" "Domain list to be updated: $stringList"
+
+###### Ansible processing
+# setup vault access (allows vault password to be sent from Rundeck)
+util::log "INFO" "Setting up vault access..."
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+# Setup log file for playbook, using same as this script
+export ANSIBLE_LOG_PATH=$updateLogFile
+
+# First, dynamically configure the playbook based on the env/domain being updated
+ansible::dynConfigPlaybook "${domainType}" "${app}${env}" "$playbookFile"
+
+if [ -n "$bootDomain" ]; then
+  bootVar="boot_domain=$bootDomain"
+else
+  bootVar=""
+fi
+# Check parallel or serial
+if [ "$serialFlag" == "1" ]; then
+   echo "  serial: 1" >> $ANSIBLE_HOME/$playbookFile
+fi
+
+# Run the ansible playbook
+extraVars="filter_app=$app filter_env=$env filter_tools_ver=$majorToolsVer $bootVar"
+# Run playbook
+ansible::runPlaybook "$extraVars" "$debugFlag" "$playbookFile"
+
+### Addtional summary output
+bash_end=$(date +%s)
+runtime=$(python -c "print '%u:%02u' % ((${bash_end} - ${bash_start})/60, (${bash_end} - ${bash_start})%60)")
+domainsUpdated=$(echo "${domainList[@]}" | sed 's/\n/\n   /g')
+util::log "INFO"  "Domains updated: "
+util::log "INFO"  "   $domainsUpdated"
+util::log "INFO"  "Run Time: $runtime"
+
+sleep 1
+echo
+util::log "INFO" "Change Inventory:"
+changeList=$( grep -B 1 "changed:" $updateLogFile )
+util::log "INFO" "$changeList"
+
+echo
+
+util::log "INFO"  "Failed Tasks:"
+failList=$( grep -B 1 "fatal" $updateLogFile )
+if [ -z "$failList" ]; then
+   util::log "INFO" "   No Failed Tasks"
+else
+   util::log "ERROR" "   $failList"
+   exit 1
+fi
+
+# Completed domain deployment

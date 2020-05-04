@@ -1,0 +1,146 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : startVMDomains
+## Description : Start PeopleSoft domains on a host.
+## Author      : Nate Werner
+## Created     : 1/12/2018
+## Updated     :
+################################################################################
+## Syntax      : startVMDomains -d <hostName> [-v] [-h]
+## Parameters  : -d <hostName>  : hostname to stop domains on.
+##             :
+##    Defaults : Clear cache on app servers, parallel TUX boot
+## Example     : startVMDomains -d psapp-dev01
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+hostName=""
+debugFlag="n"
+declare -A domAttribs
+domainList=()
+domainParameters=""
+exitCode=0
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  startVMDomains -d <hostName> [-v] [-h]"
+   echo "     Start all domains on a specific host."
+   echo " Parameters"
+   echo "     -d <hostName>    : (Required) host"
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: startVMDomains -d psapp-tst01"
+   echo "                starts all the domains on psapp-tst01 in parallel"
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's parameters
+while getopts ":vhd:" optname; do
+    case "$optname" in
+      "d")
+        hostName=$OPTARG
+        ;;
+      "v")
+        debugFlag="y"
+        export debugFlag
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/startVMDomains_${hostName}_$currentDate.log"
+util::setLogFile "$maintLogFile"
+util::log "DEBUG" "****Starting startVMDomains for ${hostName}"
+
+util::log "DEBUG" "Calling domain::getDomainsByHost $hostName"
+inventory::getDomainsByHost "$hostName" "" domainList
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Invalid host selected (domain::getDomainsByHost)"
+  exit 1
+else
+  util::log "INFO" "****Initiating startup for $hostName"
+
+  # setup vault access
+  export ANSIBLE_LOG_PATH=/dev/null
+  sec::getandStoreVaultAccess
+  if [[ $? -ne 0 ]]; then
+    util::log "ERROR" "Unable to setup vault access"
+    exit 1
+  fi
+  # Create list of __startDomain parameters from domain list
+  for domain in ${domainList[@]}; do
+     majorToolsVer=$( inventory::getCurrentTools "$domain")
+     #                                                       skipOTD clearCache serialboot
+     domainParameters="${domainParameters}${domain} ${majorToolsVer} "0" "1" "0" "0" ${debugFlag} ${maintLogFile} "
+  done
+  util::log "DEBUG" "Domain Parm List: $domainParameters"
+
+  # make parallel parse the parameters with field speparator of space
+  IFS=' '
+  ## Now fire off commands in parallel, each command having 7 parameters
+  util::log "DEBUG" "Calling parallel -j 2 -n 8 --joblog jlog_${hostName} --line-buffer maint::startDomain {1} {2} {3} {4} {5} {6} {7} {8}"
+  parallel -j 2 -n 8 --joblog jlog_${hostName} --line-buffer maint::startDomain {1} {2} {3} {4} {5} {6} {7} {8} ::: $domainParameters
+  parallelExit=$?
+  if [[ $parallelExit -ne 0 ]]; then
+    util::log "ERROR" "Parallel command failed with exit code: $parallelExit , out of space/memory?"
+  fi
+  util::log "DEBUG" "Parallel command log output: "
+  cat jlog_${app}${env} >> $maintLogFile
+
+  IFS=$'\n'
+  # Check job log (jlog) for any errors
+  errorList=( $( grep -v '0'$'\t''0' jlog_${app}${env} | grep -v JobRuntime ) )
+  if [[ -n "$errorList" ]]; then
+    for process in ${errorList[@]}; do
+       failedCommand=$( echo $process | awk -F' ' '{ print $9" "$10" "$11 }' )
+       echo "*******"
+       util::log "ERROR" "The parallel command for \"$failedCommand\" did not run to success, check logs"
+       echo "*******"
+       exitCode=1
+    done
+  fi
+
+  util::log "INFO" "Completed startup for $hostName"
+
+  # remove log file
+  rm -f jlog_${hostName}
+fi
+
+util::log "DEBUG" "****Completed startVMDomains for ${hostName}"
+util::log "INFO" "Details of the start operation can be found in $maintLogFile"
+exit ${exitCode}
+#END

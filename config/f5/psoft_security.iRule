@@ -1,0 +1,4 @@
+  if { [HTTP::uri] starts_with "/console" } {
+     HTTP::redirect "/cornsole"
+  } elseif { [HTTP::uri] starts_with "/wls-wsat" or [HTTP::uri] starts_with "/_async" } {
+     HTTP::redirect "/honeypot"

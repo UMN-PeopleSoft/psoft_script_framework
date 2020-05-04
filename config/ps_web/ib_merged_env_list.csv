@@ -1,0 +1,15 @@
+# list of envs that will run IB domains in the main PIA domain
+dmo
+dmn
+pum
+umn
+trn
+cls
+qrpt
+rpt
+fix
+idp
+cnv
+tec
+snd
+tmp

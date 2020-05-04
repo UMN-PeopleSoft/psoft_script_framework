@@ -1,0 +1,134 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : preRefresh
+## Description : Run pre refresh tasks, called from rundeck
+## Author      : Nate Werner
+## Created     : 4/21/2020
+## Updated     :
+################################################################################
+## Syntax      : preRefresh -a <appCode> -e <TargetenvCode> [-s <SourceEnvCode>] [-v] [-h]
+## Parameters  : -a <app code>  : Filter by application
+##             : -e <target env>  : Target environment for refresh
+##             : -s <source env> : (optional) Source env for refresh, defaults to prd
+##             : -z             : Run Job async in background
+##             :
+## Example     : preRefresh -a cs -e qat
+##             : preRefresh -a cs -e per -s qat
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/inventory.sh
+
+# Script variables/defaults
+app=""
+targetEnv=""
+sourceEnv="prd"
+debugFlag="n"
+refreshPath="/psoft/admin/pssa_web/pssa/refresh"
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  preRefresh -a <appCode> -e <TargetenvCode> [-s <SourceEnvCode>] [-v] [-h]"
+   echo "     Run the pre refresh script to run library sync and stop env"
+   echo "     This script will normally be called from Exadata pre_clone_steps-env.sh"
+   echo " Parameters"
+   echo "     -a <app_code>    : (Required) Filter for an application (cs,fs,hr,ih)"
+   echo "     -e <target env>  : Target environment for refresh"
+   echo "                          (dmo,dmn,umn,dev,tst,qat,fix,per,trn,cls,upg,qrpt,rpt)"
+   echo "     -s <source env> : (optional) Source env for refresh, defaults to prd"
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: preRefresh -a cs -e qat"
+   echo "        preRefresh -a cs -e per -s qat"
+
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's parameters
+while getopts ":vhe:a:s:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        targetEnv=$OPTARG
+        ;;
+      "s")
+        sourceEnv=$OPTARG
+        ;;
+      "v")
+        debugFlag="y"
+        export debugFlag
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ -z "$app" || -z "$targetEnv" ]]; then
+  echo "App and Env code is required."
+  usageInfo
+fi
+
+if [[ "$targetEnv" == "prd" ]]; then
+  echo "Cannot set target to PRD!"
+fi
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/refresh/preRefresh_${app}${targetEnv}${sourceEnv}_$currentDate.log"
+util::log "DEBUG" "****Starting preRefresh for ${app}${targetEnv} from ${sourceEnv}"
+
+#####
+
+# Update Refresh status
+echo "REFRESH" > $refreshPath/cs$targetEnv
+echo "REFRESH" > $refreshPath/fs$targetEnv
+echo "REFRESH" > $refreshPath/hr$targetEnv
+echo "REFRESH" > $refreshPath/ih$targetEnv
+
+#2 stop and blackout - same code
+$PS_SCRIPT_BASE/maint/stopAppEnv -a $app -e $targetEnv -b 2880
+
+#3 Sync library files (sqr and cobol ) for both linux and X drive
+if [ -n "$sourceEnv" ]; then
+  $PS_SCRIPT_BASE/refresh/envFileRefresh -a $app -e $targetEnv -s $sourceEnv
+else
+  $PS_SCRIPT_BASE/refresh/envFileRefresh -a $app -e $targetEnv
+fi
+
+####
+
+util::log "DEBUG" "****Completed preRefresh for ${app}${targetEnv} from ${sourceEnv}"
+util::log "INFO" "Details of the preRefresh operation can be found in $maintLogFile"
+
+#END

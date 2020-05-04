@@ -1,0 +1,33 @@
+# Defines the standard ports for each digit.
+# Key ID,  Port digit
+ih,6
+cs,7
+fs,8
+hr,9
+dmo,0
+dmn,0
+pum,0
+dev,1
+umn,1
+tst,2
+tmp,2
+qat,3
+per,4
+trn,5
+cls,5
+fix,6
+prd,7
+upg,8
+cnv,8
+snd,9
+tec,9
+main,0
+ib,1
+ren,2
+trace,3
+alt_main,5
+alt_ib,6
+alt_ren,7
+alt_trace,8
+http,1
+https,2

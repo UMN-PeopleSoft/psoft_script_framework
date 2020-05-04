@@ -1,0 +1,13 @@
+# list of envs that will use an "alt" port list
+# 1st column: env + report env flag
+# 2nd column: string to use for port map lookup
+dmn,alt_
+pum,alt_
+cls,alt_
+tec,alt_
+cnv,alt_
+rpt,alt_
+qrpt,alt_
+tec,alt_
+umn,alt_
+tmp,alt_

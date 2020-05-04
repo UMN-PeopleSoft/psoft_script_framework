@@ -1,0 +1,355 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : syncMiddleware
+## Description : Synchronize the middleware software to local VM disk
+##               Includes PeopleTools, Tuxedo, and Weblogic/Coherence.
+##               The binaries can be either synced for a specific domain
+##                or all domains on a specific host.
+## Author      : Nate Werner
+## Created     : 10/16/2019
+##
+## ################################################################################
+##
+## Syntax      : syncMiddleware -d <domainName> -s <hostName> -e <env>
+## Parameters  :  -d <domainName> : Single domain to ensure it has correct software
+##             :  -n <serverName> : Scheduler server name
+##             :  -s <hostName>   : Checks all domains on host has correct software
+##             :  -e <env>        : Checks all hosts where env is currently running
+##             :  -t <tools_ver>  : Deploys specified tools/tux for env
+##             :  -w <weblogic_ver> : Deploys specified weblogic for env
+## Example     : syncMiddleware -d acsdev1
+##             : syncMiddleware -s ents-ps-dev-appupg-04
+##             : syncMiddleware -e dev -t 8.57.10 -w 12.2.1.3.191004
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+domainName=""
+hostName=""
+serverName=""
+env=""
+newToolsVersion=""
+newWeblogicVersion=""
+
+declare -A domAttribs
+domainList=()
+exitCode=0
+# Use SSH_CMD from maint config vars (no host key checking)
+SSH_OPTIONS="${SSH_CMD} -o PreferredAuthentications=publickey -q "
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  syncMiddleware -d <domainName> -s <hostName> -e <env> -t <tools_ver> -w <web_ver> -h"
+   echo "     Synchronize the middleware software to local VM disk"
+   echo "     Includes PeopleTools, Tuxedo, and Weblogic/Coherence."
+   echo "     The binaries can be either synced for a specific domain"
+   echo "     or all domains on a specific host."
+   echo " Parameters"
+   echo "     -d <domainName>  : Domain name to sync files"
+   echo "     -n <serverName>  : (Optional/Required) Name of scheduler if not stoping PSUNX"
+   echo "     -s <hostName>    : Host Name to sync files for each domain"
+   echo "     -e <env>        : Checks all hosts where env is currently running"
+   echo "     -t <tools_ver>  : Deploys specified tools/tux for env"
+   echo "     -w <weblogic_ver> : Deploys specified weblogic for env"
+   echo "     -h               : Display this help"
+   echo
+   echo " Sample: syncMiddleware -d acsdev1"
+   echo "        syncMiddleware -e dev -t 8.57.10 -w 12.2.1.3.191004"
+   echo
+   TOOLS_VERSION_LIST=$( find /psoft/admin/gold/tools/8.* -maxdepth 0 -printf ','%f -type d )
+   echo " Valid Tools options are: $TOOLS_VERSION_LIST"
+   WEBLOGIC_VERSION_LIST=$( find /psoft/admin/gold/weblogic/1* -maxdepth 0 -printf ','%f -type d )
+   echo " Valid Weblogic options are: $WEBLOGIC_VERSION_LIST"
+   echo
+   exit
+
+}
+
+## Main program
+
+# get user's paramters
+while getopts ":hs:d:e:t:w:n:" optname
+  do
+    case "$optname" in
+      "d")
+        domainName=$OPTARG
+        ;;
+      "n")
+        serverName=$OPTARG
+        ;;
+      "s")
+        hostName=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "t")
+        newToolsVersion=$OPTARG
+        ;;
+      "w")
+        newWeblogicVersion=$OPTARG
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verify required fields
+if [[ -z "$domainName" && -z "$hostName" && -z "$env" ]]; then
+  echo "Domain Name, Host Name, or Environment is required."
+  usageInfo
+fi
+if [[ -n "$env" ]]; then
+  if [[ -z "$newToolsVersion" || -z "$newWeblogicVersion" ]]; then
+    echo "A tools version and web version is required if selecting an environment"
+    usageInfo
+  fi
+  if [ ! -e /psoft/admin/gold/tools/$newToolsVersion ]; then
+    util::log "ERROR" "Invalid Tools version specified"
+    usageInfo
+  fi
+  if [ ! -e /psoft/admin/gold/weblogic/$newWeblogicVersion ]; then
+    util::log "ERROR" "Invalid Weblogic version specified"
+    usageInfo
+  fi
+fi
+
+# Single domain sync
+if [ -n "$domainName" ]; then
+  # standard logging
+  currentDate="$(date +%y%m%d_%H%M )"
+  syncLogFile="${PS_SCRIPT_BASE}logs/maint/syncMiddleware_${domainName}_$currentDate.log"
+  util::setLogFile "$syncLogFile"
+  util::log "DEBUG" "****Running $@"
+
+  # Use most current PeopleTools Version
+  fullToolsVer=$( inventory::getCurrentTools "$domainName")
+  util::log "DEBUG" "syncMiddleware: Selected tools version: $fullToolsVer"
+  majorToolsVer="${fullToolsVer:0:4}"
+
+  inventory::getDomainInfo "$domainName" "$serverName" "$majorToolsVer" domAttribs
+  if [[ "$?" -ne 0 ]]; then
+    util::log "ERROR" "Domain $domainName does not exist"
+    exit 1
+  fi
+
+  # Capture all the versions and host
+  domToolsVer="${domAttribs[$DOM_ATTR_TOOLSVER]}"
+  domWebVer="${domAttribs[$DOM_ATTR_WEBVER]}"
+  domTuxVer=$( grep "$domToolsVer" $CONFIG_HOME/ps_app/tools_tux_map.csv | awk -F, '{ print $2 }' )
+  domHost="${domAttribs[$DOM_ATTR_HOST]}"
+
+  util::log "INFO" "Syncing Peopletools home $domToolsVer to local drive on $domHost..."
+  ssh $domHost "rsync -a /psoft/admin/gold/tools/$domToolsVer /psoft/tools/"
+  util::log "INFO" "Syncing Tuxedo home $domTuxVer to local drive on $domHost..."
+  ssh $domHost "rsync -a /psoft/admin/gold/tuxedo/$domTuxVer /psoft/tuxedo/"
+  if [[ "${domAttribs[$DOM_ATTR_TYPE]}" == "web" ]]; then
+    util::log "INFO" "Syncing Weblogic home $domWebVer to local drive on $domHost..."
+    ssh $domHost "rsync -a /psoft/admin/gold/weblogic/$domWebVer /psoft/weblogic/"
+  else
+    util::log "INFO" "Syncing current Oracle Client to local drive on $domHost..."
+    ssh $domHost "rsync -a /psoft/admin/gold/dbclient /psoft/"
+  fi
+
+  util::log "DEBUG" "****Completed Middleware Sync for ${domainName}"
+
+elif [ -n "$hostName" ]; then
+  # Host sync
+
+  # standard logging
+  syncLogFile="$PS_SCRIPT_BASE/logs/maint/syncMiddleware_${hostName}_$currentDate.log"
+  util::setLogFile "$syncLogFile"
+  util::log "DEBUG" "****Running $@"
+
+  util::log "DEBUG" "Calling domain::getDomainsByHost $hostName"
+
+  util::log "INFO" "****Initiating middleware sync for $hostName"
+
+  # Create list of versions needed for host
+  listToolsVer=()
+  listWebVer=()
+  listTuxVer=()
+
+  inventory::getDomainsByHost "$hostName" "" domainList
+  if [[ $? -ne 0 ]]; then
+    # No domains, first time, just seed the requests binaries
+    listToolsVer+=("$newToolsVersion")
+    listWebVer+=("$newWeblogicVersion")
+    domTuxVer=$( grep "$newToolsVersion" $CONFIG_HOME/ps_app/tools_tux_map.csv | awk -F, '{ print $2 }' )
+    listTuxVer+=("$domTuxVer")
+  else
+    # Domains aleady exist
+    for domain in ${domainList[@]}; do
+      majorToolsVer=$( inventory::getCurrentTools "$domain")
+
+      inventory::getDomainInfo "$domain" "" "$majorToolsVer" domAttribs
+      if [[ "$?" -ne 0 ]]; then
+        util::log "ERROR" "Domain $domain does not exist"
+        exit 1
+      fi
+      domToolsVer="${domAttribs[$DOM_ATTR_TOOLSVER]}"
+      domWebVer="${domAttribs[$DOM_ATTR_WEBVER]}"
+      domTuxVer=$( grep "$domToolsVer" $CONFIG_HOME/ps_app/tools_tux_map.csv | awk -F, '{ print $2 }' )
+
+      # add to uniqe lists of versions
+      if [[ ! " ${listToolsVer[@]} " =~ " ${domToolsVer} " ]]; then
+        listToolsVer+=("${domToolsVer}")
+      fi
+      if [[ ! " ${listWebVer[@]} " =~ " ${domWebVer} " ]]; then
+        listWebVer+=("${domWebVer}")
+      fi
+      if [[ ! " ${listTuxVer[@]} " =~ " ${domTuxVer} " ]]; then
+        listTuxVer+=("${domTuxVer}")
+      fi
+
+    done
+  fi
+
+  # now loop through the unique lists of versions and sync
+  for toolsVer in ${listToolsVer[@]}; do
+     util::log "INFO" "Syncing Peopletools home $toolsVer to local drive..."
+     ssh $hostName "rsync -a /psoft/admin/gold/tools/$toolsVer /psoft/tools/"
+  done
+  # host contains web, assume web domains are running on it
+  if [[ "$hostName" =~ *"web"* ]]; then
+    for webVer in ${listWebVer[@]}; do
+      util::log "INFO" "Syncing Weblogic home $webVer to local drive..."
+      ssh $hostName "rsync -a /psoft/admin/gold/weblogic/$webVer /psoft/weblogic/"
+    done
+  else
+    for tuxVer in ${listTuxVer[@]}; do
+      util::log "INFO" "Syncing Tuxedo home $tuxVer to local drive..."
+      ssh $hostName "rsync -a /psoft/admin/gold/tuxedo/$tuxVer /psoft/tuxedo/"
+    done
+
+    util::log "INFO" "Syncing current Oracle Client to local drive..."
+    ssh $hostName "rsync -a /psoft/admin/gold/dbclient /psoft/"
+  fi
+  util::log "DEBUG" "****Completed Middleware Sync for ${hostName}"
+
+elif [ -n "$env" ]; then
+
+  # standard logging
+  syncLogFile="$PS_SCRIPT_BASE/logs/maint/syncMiddleware_${env}_$currentDate.log"
+  util::setLogFile "$syncLogFile"
+  util::log "DEBUG" "****Running $@"
+
+  # capture full instance inventory for all 4 apps
+  util::log "DEBUG" "Calling domain::getDomainsByEnv ih/cs/fs/hr $env"
+  inventory::getDomainsByEnv "ih" "$env" "" "" "" domainListIH
+  if [[ $? -ne 0 ]]; then
+    util::log "ERROR" "Invalid env selected (domain::getDomainsByEnv)"
+    exit 1
+  fi
+  inventory::getDomainsByEnv "cs" "$env" "" "" "" domainListCS
+  inventory::getDomainsByEnv "fs" "$env" "" "" "" domainListFS
+  inventory::getDomainsByEnv "hr" "$env" "" "" "" domainListHR
+
+  #Merge into one big list of doomains
+  domainList=( "${domainListIH[@]}" "${domainListCS[@]}" "${domainListFS[@]}" "${domainListHR[@]}"  )
+
+  listWebHostName=()
+  listTuxHostName=()
+  # Get Tuxedo Version for Tools
+  envTuxVer=$( grep "$newToolsVersion" $CONFIG_HOME/ps_app/tools_tux_map.csv | awk -F, '{ print $2 }' )
+
+  util::log "INFO" "****Initiating middleware sync for $env"
+
+  # build a unique list of hosts where the env is running
+  for domain in ${domainList[@]}; do
+    majorToolsVer=$( inventory::getCurrentTools "$domain")
+
+    inventory::getDomainInfo "$domain" "" "$majorToolsVer" domAttribs
+    if [[ "$?" -ne 0 ]]; then
+      util::log "ERROR" "Domain $domain does not exist"
+      exit 1
+    fi
+    domHostName="${domAttribs[$DOM_ATTR_HOST]}"
+    domType="${domAttribs[$DOM_ATTR_TYPE]}"
+    # add to uniqe lists of hostnames by Web or Tuxedo
+    if [[ "$domType" == "web" ]]; then
+      if [[ ! " ${listWebHostName[@]} " =~ " ${domHostName} " ]]; then
+        listWebHostName+=("${domHostName}")
+      fi
+    fi
+    if [[ ! " ${listTuxHostName[@]} " =~ " ${domHostName} " ]]; then
+      listTuxHostName+=("${domHostName}")
+    fi
+  done
+
+  # Now parallelize the sync for the hosts by group (web/tuxedo)
+  # First Tuxedo List
+  # We'll limit to 3 at one time to prevent network saturation
+  # Deploy PeopleTools
+  rsyncOutput=$( parallel -j 3 -n 1 "$SSH_OPTIONS {} rsync -a /psoft/admin/gold/tools/$newToolsVersion /psoft/tools/" ::: ${listTuxHostName[@]} )
+  resultCode=$?
+  if [[ $resultCode != 0 ]]; then
+    util::log "ERROR" "Parallel call to rsync PeopleTools failed with exit code: $resultCode, Output: ${rsyncOutput}"
+    exit 1
+  fi
+  util::log "INFO" "Completed PeopleTools sync to Tuxedo hosts..."
+  # Deploy Tuxedo
+  rsyncOutput=$( parallel -j 3 -n 1 "$SSH_OPTIONS {} rsync -a /psoft/admin/gold/tuxedo/$envTuxVer /psoft/tuxedo/" ::: ${listTuxHostName[@]} )
+  resultCode=$?
+  if [[ $resultCode != 0 ]]; then
+    util::log "ERROR" "Parallel call to rsync Tuxedo failed with exit code: $resultCode, Output: ${rsyncOutput}"
+    exit 1
+  fi
+  util::log "INFO" "Completed Tuxedo sync to Tuxedo hosts..."
+  # Deploy DB Client
+  rsyncOutput=$( parallel -j 3 -n 1 "$SSH_OPTIONS {} rsync -a /psoft/admin/gold/dbclient /psoft/" ::: ${listTuxHostName[@]} )
+  resultCode=$?
+  if [[ $resultCode != 0 ]]; then
+    util::log "ERROR" "Parallel call to rsync Tuxedo failed with exit code: $resultCode, Output: ${rsyncOutput}"
+    exit 1
+  fi
+  util::log "INFO" "Completed Oracle Client sync to Tuxedo hosts..."
+  # Now run for Weblogic hosts
+  # Deploy PeopleTools
+  rsyncOutput=$( parallel -j 3 -n 1 "$SSH_OPTIONS {} rsync -a /psoft/admin/gold/tools/$newToolsVersion /psoft/tools/" ::: ${listWebHostName[@]} )
+  resultCode=$?
+  if [[ $resultCode != 0 ]]; then
+    util::log "ERROR" "Parallel call to rsync PeopleTools failed with exit code: $resultCode, Output: ${rsyncOutput}"
+    exit 1
+  fi
+  util::log "INFO" "Completed PeopleTools sync to Web hosts..."
+  # Deploy Weblogic
+  rsyncOutput=$( parallel -j 3 -n 1 "$SSH_OPTIONS {} rsync -a /psoft/admin/gold/weblogic/$newWeblogicVersion /psoft/weblogic/" ::: ${listWebHostName[@]} )
+  resultCode=$?
+  if [[ $resultCode != 0 ]]; then
+    util::log "ERROR" "Parallel call to rsync Weblogic failed with exit code: $resultCode, Output: ${rsyncOutput}"
+    exit 1
+  fi
+  util::log "INFO" "Completed Weblogic sync to Web hosts."
+  util::log "DEBUG" "****Completed Middleware Sync for ${env}"
+
+fi
+
+util::log "INFO" "Details of the start operation can be found in $syncLogFile"
+exit ${exitCode}
+#END

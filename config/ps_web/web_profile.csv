@@ -1,0 +1,17 @@
+# List of web profiles based on env
+dev,UM_WEB
+tst,UM_WEB
+qat,UM_WEB
+prd,UM_WEB
+upg,UM_WEB
+fix,UM_WEB
+per,UM_WEB
+trn,UM_WEB
+cls,UM_WEB
+dmo,TEST
+dmn,TEST
+tec,UM_WEB
+umn,UM_WEB
+cnv,TEST
+snd,TEST
+tmp,UM_WEB

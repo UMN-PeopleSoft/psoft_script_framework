@@ -1,0 +1,183 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : updateDomain
+## Description : update a web/app/sched domain using ansible to apply config changes
+## Author      : Nate Werner
+## Created     : 2/22/2018
+##
+################################################################################
+##
+## Syntax      : updateDomain -d <name> -s <serverName>
+## Parameters  :   name = existing domain name (unique for all domains except schedulers, see serverName)
+##             :   serverName = Scheduler name (ie: psunx, psunx2, etc)
+## Example     : updateDomain -d csdev1
+##
+################################################################################
+
+### Help Instructions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  updateDomain will update an existing domain to apply configuration changes"
+   echo "  using ansible playbook to update the domain."
+   echo " Parameters"
+   echo "     -d <name>      : domain name (unique for all domains except schedulers, see serverName)"
+   echo "     -n <serverName>: Server/Scheduler name (ie: psunx, psunx2, etc)"
+   echo "     -t <toolsVersion>: Major tools version. Select if multiple versions of a domain exist"
+   echo "     -b             : re-boot domain after updateing (default: leave domain down if stopped)"
+   echo "     -v             : Enable ansible debug/verbose mode"
+   echo "     -h             : Display this help"
+   echo
+   exit 1
+}
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+source $LIB_HOME/ansible.sh
+
+##### Variable and defaults
+# Set in bootstrap:
+#   ANSIBLE_HOME
+#   DOMAIN_LIST
+#   MAINT_HOME
+#   SCRIPT_HOME
+
+playbookFile="update_domain.yml"
+debugFlag=""
+domainName=""
+serverName=""
+bootDomain=""
+declare -A domAttribs
+bootVar=""
+fullToolsVer=""
+majorToolsVer=""
+
+##### Prompt processing and validation
+while getopts "hvbd:n:t:" optname
+  do
+    case "$optname" in
+      "d")
+        domainName=$OPTARG
+        ;;
+      "n")
+        serverName=$OPTARG
+        ;;
+      "t")
+        fullToolsVer=$OPTARG
+        ;;
+      "b")
+        bootDomain="True"
+        ;;
+      "v")
+        debugFlag="-vvv"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+  done
+
+## Main
+
+# Calculate run duration
+bash_start=$(date +%s)
+currentDate="$(date +%y%m%d_%H%M )"
+# standard logging
+updateLogFile="${PS_SCRIPT_BASE}logs/maint/updateDomain_${domainName}_$currentDate.log"
+util::setLogFile "$updateLogFile"
+util::log "DEBUG" "****Running $@"
+
+# verifiy required fields
+if [[ -z "$domainName" ]]; then
+  util::log "ERROR" "Domain Name is required."
+  usageInfo
+fi
+
+#### Update and check domain list
+echo
+util::log "INFO" "Re-syncing domain list..."
+$MAINT_HOME/syncDomainList -d $domainName
+util::log "INFO" "Sync Completed"
+echo
+
+if [ -z "$fullToolsVer" ]; then
+  fullToolsVer=$( inventory::getCurrentTools "$domainName")
+fi
+util::log "DEBUG" "updateDomain: Selected tools version: $fullToolsVer"
+majorToolsVer="${fullToolsVer:0:4}"
+
+inventory::getDomainInfo "$domainName" "$serverName" "$majorToolsVer" domAttribs
+if [[ "$?" -ne 0 ]]; then
+  util::log "ERROR" "Domain $domainName does not exist"
+  exit 1
+fi
+
+###### Ansible processing
+# setup vault access (allows vault password to be sent from Rundeck)
+util::log "INFO" "Setting up vault access..."
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+# Setup log file for playbook, using same as this script
+export ANSIBLE_LOG_PATH=$updateLogFile
+
+# First, dynamically configure the playbook based on the domain being created
+ansible::dynConfigPlaybook "${domAttribs[$DOM_ATTR_TYPE]}" "${domAttribs[$DOM_ATTR_HOST]}" "$playbookFile"
+
+if [ -n "$bootDomain" ]; then
+  bootVar="boot_domain=$bootDomain"
+else
+  bootVar=""
+fi
+
+# Run the ansible playbook
+extraVars="filter_name=$domainName filter_tools_ver=$majorToolsVer $bootVar"
+# Run playbook
+ansible::runPlaybook "$extraVars" "$debugFlag" "$playbookFile"
+
+### Addtional summary output
+bash_end=$(date +%s)
+runtime=$(python -c "print '%u:%02u' % ((${bash_end} - ${bash_start})/60, (${bash_end} - ${bash_start})%60)")
+domainsUpdated=$(echo "${domainList[@]}" | sed 's/\n/\n   /g')
+util::log "INFO"  "Domain updated: "
+util::log "INFO"  "   $domainsUpdated"
+util::log "INFO"  "Run Time: $runtime"
+
+sleep 1
+echo
+util::log "INFO" "Change Inventory:"
+changeList=$( grep -B 1 "changed:" $updateLogFile )
+util::log "INFO" "$changeList"
+echo
+
+util::log "INFO"  "Failed Tasks:"
+failList=$( grep -B 1 "fatal" $updateLogFile )
+if [ -z "$failList" ]; then
+   util::log "INFO" "   No Failed Tasks"
+else
+   util::log "ERROR" "   $failList"
+   exit 1
+fi
+
+# Completed domain update

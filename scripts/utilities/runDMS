@@ -1,0 +1,111 @@
+#!/bin/env bash
+#
+################################################################################
+##
+## File Name   : runDMS
+## Description : Run a Data Mover Script on the server.  Supports bootstap option
+## Author      : Nate Werner
+## Created     : 2/28/2020
+################################################################################
+## Syntax      : runDMS -a <app> -e <env> -f <DMS file> -b
+##
+## Parameters  : -a <app>  : (Required)Target app to run DMS script
+##             : -e <env>  : (Required)Target env to run DMS Script
+##             : -f <file> : Data mover script file to run
+##             : -b        : Enable bootstrap mode to run script
+##
+## Example     : runDMS -a cs -e dev -f /tmp/securityexport.dms
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+
+app=""
+env=""
+dmsFile=""
+bootstrap="N"
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "   runDMS -a <app> -e <env> -f <DMS file> -b"
+   echo "     Run a data mover script"
+   echo "     -a <app>  : (Required) App to run DMS script"
+   echo "     -e <env>  : (Required) Env to run DMS Script"
+   echo "     -f <file> : (Required) Data mover script file to run"
+   echo "     -b        : Run script in bootstrap mode"
+   echo "     -h        : Display this help"
+   echo
+   echo "Sample: runDMS -a cs -e dev -f /tmp/securityexport.dms"
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":bha:e:f:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "f")
+        dmsFile=$OPTARG
+        ;;
+      "b")
+        bootstrap="Y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+# verifiy required fields
+if [[ -z "$app" ]]; then
+  echo "App is required."
+  usageInfo
+fi
+
+if [[ -z "$env" ]]; then
+  echo "Environment is required."
+  usageInfo
+fi
+
+if [[ ! -e "$dmsFile" ]]; then
+  echo "File does not exist."
+  usageInfo
+fi
+
+# setup log file for process
+currentDate="$(date +%y%m%d_%H%M )"
+dmsLogFile="$PS_SCRIPT_BASE/logs/utilites/runDMS_${app}_${env}_$currentDate.log"
+util::setLogFile "$dmsLogFile"
+
+util::runDMS "$app" "$env" "$dmsFile" "$bootstrap"
+
+#END

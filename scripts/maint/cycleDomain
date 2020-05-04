@@ -1,0 +1,179 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : cycleDomain
+## Description : Cycle a PeopleSoft domain.  Will include additional
+##               steps like, web pool member in F5, add/remove blackout in OEM,
+##               verify proper stop/start of processes.  Only need to provide -t if
+##               stopping a domain of same name on older tools version.  Use -m
+##               to clear cache for app domains. By default,
+##               Coherence cache servers are not stopped, use -c to also stop/start
+##               the cache servers with the domain.
+## Author      : Nate Werner
+## Created     : 11/17/2017
+## Updated     : 2/17/19 - Moved OEM to local file blackout list
+################################################################################
+## Syntax      : cycleDomain -d <domainName> [-n <serverName>] [-t <major tools version>]
+##                  [-m] [-c] [-s] [-z] [-v] [-h]
+## Parameters  : -d <domainName>  : Domain name to start
+##             : -n <serverName>  : Processss scheduler server name if starting
+##                   a server other than PSUNX.
+##             : -t <major tools version> : If not provided assumes most current
+##                   else searches for specified version of domain (ie:8.54)
+##             : -m  : If an app server domains clear all cache before cycleing.
+##             : -c  : Also cycle Coherence cache servers on domains they run on.
+##             : -s  : Use serial boot method for app server domains.
+##             : -z  : force app server domain to stop, default is graceful stop.
+##             :
+## Example     : cycleDomain -d acstst1 -m -s
+##                  Restart app server domain acstst1, clearing cache, and using
+##                  the serial boot method in psadmin.
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source  $LIB_HOME/inventory.sh
+source $LIB_HOME/monitor.sh
+source  $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+domainName=""
+serverName=""
+majorToolsVer=""
+# turn off all optional features by default
+clearCache=0
+serialBoot=0
+cycleCoherence=0
+forceStop=0
+blackoutDur=$MAINT_DEF_BLACKOUT_DUR
+debugFlag="n"
+declare -A domAttribs
+exitCode=0
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  cycleDomain -d <domainName> [-n <serverName>] [-t <major tools version>] [-m] [-c] [-s] [-z] [-v] [-h]"
+   echo "     Cycle a single domain.   Defalt behavior will cycle"
+   echo "     the most current tools version of the domain, disable/enabling web "
+   echo "     domains in F5, app server cache is not cleared, but web/prcs domains"
+   echo "     are always cleared.  Use -c to also include Coherence cache"
+   echo "     servers in cycle."
+   echo " Parameters"
+   echo "     -d <domainName>  : (Required) Name of domain to start"
+   echo "     -n <serverName>  : (Optional/Required) Name of scheduler if not starting PSUNX"
+   echo "     -t <maj_tools_ver>: (Optional) Tools version of the domain if not the most current"
+   echo "     -m               : (Optional) Clear cache for app server domain"
+   echo "     -c               : (Optional) Add Coherence cache server in cycle."
+   echo "     -s               : (Optional) Use the serial boot method instead of parallel,"
+   echo "                            for app server domains."
+   echo "     -z               : (Optional) Force shutdown of app server domains, default gracefull"
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: cycleDomain -d csdev2 -c"
+   echo "                Cycles the csdev2 web domain.  Will also cycle the Coherence"
+   echo "                  cache server."
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":vhzmsct:d:n:" optname; do
+    case "$optname" in
+      "d")
+        domainName=$OPTARG
+        ;;
+      "n")
+        serverName=$OPTARG
+        ;;
+      "t")
+        majorToolsVer=$OPTARG
+        ;;
+      "m")
+        clearCache=1
+        ;;
+      "c")
+        cycleCoherence=1
+        ;;
+      "s")
+        serialBoot=1
+        ;;
+      "z")
+        forceStop=1
+        ;;
+      "v")
+        debugFlag="y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ -z "$domainName" ]]; then
+  echo "Domain Name is required."
+  usageInfo
+fi
+
+# setup log file for process
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/cycleDomain_${domainName}_$currentDate.log"
+util::setLogFile "$maintLogFile"
+util::log "DEBUG" "****Starting cycleDomain for ${domainName}"
+
+# if tools version was not provided, get most current
+if [[ -z "$majorToolsVer" ]]; then
+  majorToolsVer=$( inventory::getCurrentTools "$domainName")
+fi
+
+# setup vault access
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+
+# Start blackout for app/env
+monitor::startBlackout "${domainName}" "${serverName}" "$blackoutDur" ""
+
+util::log "DEBUG" "Calling maint::cycleDomain ${domainName}${serverName} ${majorToolsVer} 0 ${clearCache} ${serialBoot} ${cycleCoherence} ${forceStop} ${debugFlag} ${maintLogFile}"
+maint::cycleDomain "${domainName}${serverName}" "${majorToolsVer}" "0" "${clearCache}" "${serialBoot}" "${cycleCoherence}" "${forceStop}" "${debugFlag}" "${maintLogFile}"
+if [ $? -ne 0 ]; then
+  echo "*******"
+  util::log "ERROR" "The command \"maint::cycleDomain ${domainName}${serverName} ${majorToolsVer}\" did not run to success, check logs"
+  echo "*******"
+  exitCode=1
+fi
+
+# End standard blackout for app/env
+monitor::endBlackout "${domainName}" "${serverName}"
+
+util::log "DEBUG" "****Completed cycleDomain for ${domainName}"
+util::log "INFO" "Details of the cycle operation can be found in $maintLogFile"
+exit ${exitCode}
+#END

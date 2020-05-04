@@ -1,0 +1,32 @@
+---
+# defaults file for f5lb
+
+# Imput parameters
+filter_app: fs
+filter_env: prd
+
+# F5 partition for PSSA Stuff
+um_f5_partition: "psoft"
+# All Virt servers use 443
+um_f5_vip_port: 443
+# UMN stardard base F5 settings
+um_f5_protocol_profile: "/Common/umn_tcp-lan-optimized"
+um_f5_parent_persistence: "/ENTS/psoft_cookie"
+
+# UMN PSSA base settings
+um_f5_compression: "/ENTS/psoft_compression"
+um_f5_cache: "/ENTS/psoft_myu_cache"
+um_f5_http_profile: "/ENTS/psoft_http_opt"
+um_f5_websocket_profile: "/ENTS/psoft_socket"
+
+# iRules that need to apply before psoft Routing iRule
+um_pre_std_iRules:
+   - "/ENTS/psoft_50x_maint"
+
+# Standard UMN iRules added after Psoft Routing iRule
+um_post_std_iRules:
+   - "/Common/HSRP-gateway"
+   - "/Common/snat_automap_irule"
+
+um_ib_ext_iRules:
+   - "/ENTS/psoft_ib_ext"

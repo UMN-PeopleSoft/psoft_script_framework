@@ -1,0 +1,10 @@
+when HTTP_REQUEST {
+  HTTP::header replace "WL-Proxy-Client-IP" [IP::client_addr]
+  HTTP::header replace "X-forwarded-for" [IP::client_addr]
+  HTTP::header replace "WL-Proxy-SSL" "true"
+
+{{ psoft_security_sub_irule }}
+  } elseif { [HTTP::uri] equals "/" } {
+     HTTP::redirect "/psp/cs{{ filter_env }}/?cmd=login&languageCd=ENG"
+  }
+}

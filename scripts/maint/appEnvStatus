@@ -1,0 +1,350 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : appEnvStatus
+## Description : Display the status of all domains in an app/env
+## Author      : Nate Werner
+## Created     : 2/2/2018
+## Updated     :
+################################################################################
+## Syntax      : appEnvStatus -a <appCode> -e <envCode> [-v] [-h]
+## Parameters  : -a <app code>  : Filter by application
+##             : -e <env code>  : Filter by environment
+##             :
+## Example     : appEnvStatus -a cs -e qat
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+app=""
+env=""
+# turn off all optional features by default
+verboseFlag="n"
+declare -A domAttribs
+domainList=()
+domainParameters=""
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  appEnvStatus -a <app_code> -e <env_code> [-v] [-h]"
+   echo "     Displays the status of all domains in an Env.  Includes ElasticSearch"
+   echo "     Displays resource load on the web and app servers. "
+   echo " Parameters"
+   echo "     -a <app_code>    : (Required) Filter for an application (cs,fs,hr,ih)"
+   echo "     -e <env_code>    : (Required) Filter for environment"
+   echo "                          (dmo,dmn,umn,dev,tst,qat,fix,per,trn,cls,prd,upg,qrpt,rpt)"
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: appEnvStatus -a cs -e dev"
+   echo
+   exit
+
+}
+
+function GetAppStats()
+{
+   local domainName="$1"
+   local app="$2"
+   local env="$3"
+   local host="$4"
+
+   ssh -o StrictHostKeyChecking=no -o ConnectTimeout=1 $host ". ${app}${env}.env && psadmin -c sstatus -d $domainName 2>&1 | grep PSAPPSRV"
+
+}
+export -f GetAppStats
+function GetWebStats()
+{
+   local domainName="$1"
+   local app="$2"
+   local env="$3"
+   local host="$4"
+   local domainPath="/psoft/domains/8.57/webserv/$domainName"
+   ssh -o StrictHostKeyChecking=no -o ConnectTimeout=1 $host "source tools857.env && echo '' > $domainPath/servers/PIA/logs/PIA_stdout.log && $domainPath/bin/createThreadDump.sh > /dev/null && sleep 2 && grep -A 2 pool $domainPath/servers/PIA/logs/PIA_stdout.log" | grep java.lang.Thread.State | awk '{ print $2$3 }' | sort | uniq -c
+
+}
+export -f GetWebStats
+
+######## Main program
+
+# get user's parameters
+while getopts ":vhe:a:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "v")
+        verboseFlag="y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ -z "$app" || -z "$env" ]]; then
+  echo "App and Env code is required."
+  usageInfo
+fi
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="$PS_SCRIPT_BASE/logs/maint/appEnvStatus_${app}${env}_$currentDate.log"
+util::log "DEBUG" "****Starting appEnvStatus for ${app}${env}"
+
+# if tools version was not provided, get most current
+if [[ -z "$majorToolsVer" ]]; then
+  majorToolsVer=$( inventory::getCurrentToolsAppEnv "$app" "$env" "$domainType")
+fi
+util::log "DEBUG" "stopAppEnv: Selected tools version: $majorToolsVer"
+
+util::log "DEBUG" "Calling domain::getDomainsByEnv $app $env $domainType $majorToolsVer"
+# get array of domains in app/env
+inventory::getDomainsByEnv "$app" "$env" "$domainType" "" "$majorToolsVer" domainList
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Invalid app/env selected (domain::getDomainsByEnv)"
+else
+
+  appList=()
+  appListStatus=()
+  webList=()
+  webListStatus=()
+  cohCacheListStatus=()
+  schedList=()
+  schedListStatus=()
+  hostList=()
+
+  # Create list of __startDomain parameters from domain list
+  for domain in ${domainList[@]}; do
+    inventory::getDomainInfo "$domain" "" "$majorToolsVer" domAttrib
+    if [[ "${domAttrib[$DOM_ATTR_TYPE]}" == "web" ]]; then
+      domainDate=$( ssh -o ConnectTimeout=1 ${domAttrib[$DOM_ATTR_HOST]} ps -ef | grep "java" | grep "/$domain" | grep -v "grep" | grep -v "DefaultCacheServer" | grep -v "EMIntegrationServer" | awk '{ print $5 }' )
+      webList+=("$domain")
+      if [[ -n "$domainDate" ]]; then
+         webListStatus+=("$domainDate")
+      else
+         webListStatus+=("Inactive")
+      fi
+      if [[ "${domAttrib[$DOM_ATTR_HOST]}" == *psdbg* ]]; then
+        # No coherence on debug domains
+        cohCacheListStatus+=("")
+      else
+        ssh -o ConnectTimeout=1 ${domAttrib[$DOM_ATTR_HOST]} "ls /psoft/domains/${majorToolsVer:0:4}/webserv/${domain}/config/*cache.xml &> /dev/null"
+        if [ $? -eq 0 ]; then
+          domainDate=$( ssh -o ConnectTimeout=1 ${domAttrib[$DOM_ATTR_HOST]} ps -ef | grep "java" | grep "/${domain}" | grep "${majorToolsVer:0:4}" | grep -v "grep" | grep "DefaultCacheServer" | awk '{ print $5 }' )
+          if [[ -n "$domainDate" ]]; then
+            cohCacheListStatus+=("$domainDate")
+          else
+            cohCacheListStatus+=("Inactive")
+          fi
+        else
+          cohCacheListStatus+=("")
+        fi
+      fi
+
+    fi
+
+    if [[ "${domAttrib[$DOM_ATTR_TYPE]}" == "app" ]]; then
+      domainDate=$( ssh -o ConnectTimeout=1 ${domAttrib[$DOM_ATTR_HOST]} ps -eo start_time,cmd | grep BBL | grep "/$domain" | grep -v "grep" | grep -v "OEM" | awk '{ print $1 }' )
+      appList+=("$domain")
+      if [[ -n "$domainDate" ]]; then
+         appListStatus+=("$domainDate")
+      else
+         appListStatus+=("Inactive")
+      fi
+    fi
+    if [[ "${domAttrib[$DOM_ATTR_TYPE]}" == "prc" ]]; then
+      domainDate=$( ssh -o ConnectTimeout=1 ${domAttrib[$DOM_ATTR_HOST]} ps -eo start_time,cmd | grep BBL | grep "/${domain/PSUNX*}" | grep -v "grep" | grep -v "OEM" | awk '{ print $1 }' )
+      schedList+=("$domain")
+      if [[ -n "$domainDate" ]]; then
+         schedListStatus+=("$domainDate")
+      else
+         schedListStatus+=("Inactive")
+      fi
+    fi
+    hostList+=("${domAttrib[$DOM_ATTR_HOST]}")
+  done
+
+  ##################################
+   echo
+   tput sgr0
+   #tput cup 11 6
+   tput setaf 2
+   tput bold
+   echo "              Environment Status for $app$env ($majorToolsVer)"
+   tput sgr0
+   #tput cup 13 3
+   echo
+   tput setaf 6
+   echo "   App Servers           (since)       Process Sched"
+   tput sgr0
+
+   maxApp=${#appList[@]}
+   maxPrcs=${#schedList[@]}
+   if [[ $maxPrcs -gt $maxApp ]]; then
+     maxApp=$maxPrcs
+   fi
+
+   domainCount=0
+
+   for (( ix=0; ix <= $maxApp; ix++))
+   do
+      tput cuf 3
+      if [[ -n ${appList[$ix]} ]]; then
+        let domainCount=domainCount+1
+        echo "$domainCount) ${appList[$ix]}:"
+      else
+        echo " "
+      fi
+      tput cuu1
+      tput cuf 22
+      tput bold
+      echo "${appListStatus[$ix]}"
+      tput sgr0
+      # schedulers
+      if [ "${#schedList[$ix]}" -gt "1" ]
+        then
+        tput cuu1
+        tput cuf 38
+        let domainCount=domainCount+1
+        echo "$domainCount) ${schedList[$ix]}:"
+        tput cuu1
+        tput cuf 54
+        tput bold
+        echo "${schedListStatus[$ix]}"
+        tput sgr0
+      fi
+   done
+
+   tput sgr0
+   tput setaf 6
+   tput cuf 3
+   echo "Web Servers         (since)      Coherence Cache (since)"
+   tput sgr0
+   for ix in ${!webList[*]}
+   do
+      tput cuf 3
+      let domainCount=domainCount+1
+      echo "$domainCount) ${webList[$ix]}:"
+      tput cuu1
+      tput cuf 21
+      tput bold
+      echo "${webListStatus[$ix]}"
+      tput sgr0
+      if [[ -n "${cohCacheListStatus[$ix]}" ]]; then
+        # Coherence servers
+        tput cuu1
+        tput cuf 37
+        let domainCount=domainCount+1
+        echo "$domainCount) ${webList[$ix]}:"
+        tput cuu1
+        tput cuf 54
+        tput bold
+        echo "${cohCacheListStatus[$ix]}"
+        tput sgr0
+      fi
+   done
+
+   echo
+   tput sgr0
+   tput setaf 6
+   tput cuf 3
+   echo "              VMs for $app$env"
+   tput sgr0
+   IFS=$'\n'
+   uhostList=()
+   uhostList=( $( echo "${hostList[*]}" | sort -u ) )
+   unset IFS
+   hostCount=${#uhostList[@]}
+   for ix in ${!uhostList[*]}
+   do
+      tput cuf 3
+      echo "${uhostList[$ix]}"
+      tput cuu1
+      tput sgr0
+      let ix=ix+1
+      if [[ $ix -le $hostCount && -n "${uhostList[$ix]}" ]]; then
+        tput cuf 37
+        echo "${uhostList[$ix]}"
+        tput sgr0
+      fi
+   done
+   unset IFS
+   echo
+   tput setaf 2
+   tput bold
+   echo "              Stats for $app$env"
+   tput sgr0
+
+  # Read app server summary
+  inventory::getDomainsByEnv "$app" "$env" "app" "" "$majorToolsVer" domainList
+  domainParameters=""
+  for domain in ${domainList[@]}; do
+    inventory::getDomainInfo "$domain" "" "$majorToolsVer" domAttribs
+    # parameter string must have a space at the end
+    if [[ ${domAttribs[$DOM_ATTR_PURPOSE]} == "main" ]]; then
+      domainParameters="${domainParameters}${domain} ${app} ${env} ${domAttribs[$DOM_ATTR_HOST]} "
+    fi
+  done
+  IFS=' '
+
+  results=$( parallel -j 0 -n 4 GetAppStats {1} {2} {3} {4} ::: $domainParameters )
+  #echo -e "$results"
+  # --line-buffer
+  appSrvs=$( echo $results | wc -l)
+  echo "   Total APPSERV Instances: $appSrvs"
+  activeAppSrvs=$( echo $results | grep -v IDLE | wc -l)
+  echo "   Total active APPSERV Instances: $activeAppSrvs"
+  load=$(( $activeAppSrvs * 100 / $appSrvs ))
+  echo "   Total APPSERV load = ${load}%"
+
+  echo
+  inventory::getDomainsByEnv "$app" "$env" "web" "" "$majorToolsVer" domainList
+  domainParameters=""
+  for domain in ${domainList[@]}; do
+    inventory::getDomainInfo "$domain" "" "$majorToolsVer" domAttribs
+    # parameter string must have a space at the end
+    if [[ ${domAttribs[$DOM_ATTR_PURPOSE]} == "main" ]]; then
+      domainParameters="${domainParameters}${domain} ${app} ${env} ${domAttribs[$DOM_ATTR_HOST]} "
+    fi
+  done
+  IFS=' '
+
+  results=$( parallel -j 0 -n 4 GetWebStats {1} {2} {3} {4} ::: $domainParameters )
+  #echo -e "$results"
+  # --line-buffer
+  webActive=$( echo "$results" | grep "TIMED_WAITING(on" | wc -l)
+  echo "   Total Active Web sessions: $webActive"
+  webStuck=$( echo "$results" | egrep "STUCK|HOG" | wc -l)
+  echo "   Total 'slow' Web sessions: $webStuck"
+
+fi
+
+util::log "DEBUG" "****Completed appEnvStatus for ${app}${env}"
+#END

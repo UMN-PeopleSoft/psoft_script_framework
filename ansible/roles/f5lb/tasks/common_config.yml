@@ -1,0 +1,76 @@
+---
+# tasks file for common F5 Configs
+# Includes iFile (503-4 message), HTTP Compression Profile, Web Acceleration Profile
+# These configs will be applied globally for all PSSA Virt servers.
+# All templates and files will be located in the separate config repository represented by "config_home".
+
+#- name: Load the 503 html file as an iFile
+#  bigip_file_copy:
+#    name: psoft_503_html
+#    source: "{{ config_home }}/f5/503_myu_maint_message.html"
+#    datastore: "ifile"
+#    force: yes
+#    partition: "{{ um_f5_partition }}"
+#    state: present
+#  delegate_to: localhost
+#  tags: common
+
+# load the common IRules
+
+- name: Add iRule for routing to iFile friendly page when pools are down
+  bigip_irule:
+    src: "{{ config_home }}/f5/psoft_50x_maint.iRule"
+    module: ltm
+    name: psoft_50x_maint
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  tags: common
+
+- name: Create PIA Monitor
+  bigip_monitor_http:
+    name: psoft_pia_monitor
+    send: "GET /psp/dummy/?cmd=expire"
+    receive: ".*Site.*"
+    interval: 15
+    timeout: 16
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  tags: common
+
+- name: Create Shib/Apache Monitor
+  bigip_monitor_http:
+    name: psoft_shib
+    send: "GET /psp/dummy/?cmd=expire HTTP/1.1\r\nHost: ps.company.com\r\nConnection: Close\r\n\r\n"
+    receive: ".*Site.*"
+    interval: 15
+    timeout: 16
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  tags: common
+
+- name: Create IB-PSIGW Monitor
+  bigip_monitor_http:
+    name: psoft_psigw_monitor
+    send: "GET /PSIGW/PeopleSoftListeningConnector"
+    receive: ".*ACTIVE.*"
+    interval: 10
+    timeout: 11
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  tags: common
+
+- name: Create REN Monitor
+  bigip_monitor_http:
+    name: psoft_ren_monitor
+    send: "GET /"
+    receive: ".*403.*"
+    interval: 120
+    timeout: 121
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  tags: common

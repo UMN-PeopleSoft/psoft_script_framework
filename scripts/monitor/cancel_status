@@ -1,0 +1,148 @@
+#!/usr/local/bin/bash
+################################################################################
+## File name   : cancel_status
+## Description : Check process scheduler for any reports in "CANCEL" status
+## Created     : 03/23/2020
+## Updated     :
+################################################################################
+## Syntax      : cancel_status
+##
+################################################################################
+## Note1       : To exclude monitoring specific domains, add domain name in
+##               /psoft/admin/config/inventory/domain.exclude
+##
+## Note2       : BO test done with "ENV:ihtst|.." entry
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%%scripts*}scripts/library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+source $LIB_HOME/monitor.sh
+
+# Define list of envs to monitor
+envList="${MON_ENV_LIST[@]}"
+appList="${MON_APP_LIST[@]}"
+# override for testing
+#envList=("tst")
+#appList=("ih")
+
+criticalEnvs="prd|rpt|trn|cls|fix"
+
+# variables
+env=""
+app=""
+
+# setup vault access
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+
+### SQL script to extract list of long running SQL
+Check_SQL=$( cat <<EOF
+set linesize 200\nset heading off\nset verify off\n select PRCSNAME || ' with prcsinstance '|| PRCSINSTANCE || ' in CANCEL status within last 24 hrs' from psprcsrqst Where RUNDTTM > Sysdate - 1 and RUNSTATUS = 1
+EOF
+)
+
+Post_SQL=$( cat <<EOF
+update psprcsque set runstatus='8' where prcsinstance = '${instance_num}';
+update psprcsrqst set runstatus='8' where prcsinstance = '${instance_num}';
+commit
+EOF
+)
+
+#Main step
+# Loop through each env and each app
+for env in ${envList[@]}; do
+  for app in ${appList[@]}; do
+
+    echo "Domains being monitored=${app}${env}"
+    SQLResult=""
+    SQLResult2=""
+
+    # SLA window check
+    if util::isInSLA "$app" "$env"; then
+      #echo "I am in SLA"
+      sleep 1
+    else
+      # echo "I am not in SLA, do not monitor"
+      continue
+    fi
+
+    # check if the domain is in BO list. Exclude-list is irrelavent for psched
+    if monitor::isAppEnvInBlackout "$app" "$env"; then
+       echo "$app$env: Skipping domain monitoring (Blackout List)"
+       continue
+    fi;
+
+   # check for any processes with "CANCEL" status
+    util::runSQL  "$app" "$env"  "$Check_SQL" SQLResult
+    # any oracle error, skip monitoring.
+    if [[ $sqlExitcode == 1 ]]; then
+        echo "Oracle access or SQL error in PS${env^^}. Skip monitoring"
+        continue
+    elif [[ $sqlExitcode > 1 ]]; then
+        echo "DB down or Oracle connection error in PS${env^^}. Skip monitoring"
+        continue
+    fi;
+
+    # for CANCEL processes, update it to CANCELLED and notify pssa
+    echo -e "$SQLResult"|awk -F' ' '{print $4}' | while read instance_num
+    do
+    if [[ -n "$instance_num"  &&  $instance_num =~ ^[0-9]+$ ]]; then
+
+      # execute sqls to change "cancel" to "cancelled"
+      util::runMonitorSQL "$app" "$env" "update psprcsque set runstatus='8' where prcsinstance = '${instance_num}';update psprcsque set runstatus='8' where prcsinstance = '${instance_num}';" SQLResult2
+
+      sqlExitCode=$?
+      if [[ $sqlExitcode == 1 ]]; then
+        echo "Oracle access or SQL error in PS${env^^}. Skip monitoring"
+        continue
+      elif [[ $sqlExitcode > 1 ]]; then
+        echo "DB down or Oracle connection error in PS${env^^}. Skip monitoring"
+        continue
+      fi;
+
+      # check for any CANCELL status 2nd time
+      sleep 20
+      util::runSQL  "$app" "$env"  "$Check_SQL" SQLResult3
+      sqlExitcode=$?
+      # any oracle error, skip monitoring.
+      if [[ $sqlExitcode == 1 ]]; then
+         echo "Oracle access or SQL error in PS${env^^}. Skip monitoring"
+         continue
+      elif [[ $sqlExitcode > 1 ]]; then
+         echo "DB down or Oracle connection error in PS${env^^}. Skip monitoring"
+         continue
+      fi;
+
+      # ready to notify pssa
+      if [[ $SQLResult3 -gt 0 ]]; then
+         # prepare for Email Nofication
+         subject="Batch Process in CANCEL status in ${app^^}${env^^}";export subject
+         echo "  " >> $LOGDIR/cancel_status_in_psched$LIB.out;
+         echo "Changed its runstatus from CANCEL to CANCELLED (ie, runstatus=8) in $SCHEMA.psprcsque and $SCHEMA.psprcsrqst for above instance." >>$LOGDIR/cancel_status_in_psched$LIB.out;
+      else
+         echo "No more CANCEL status"
+         continue
+      fi;
+    else
+      echo "All is well."
+      continue
+    fi;
+    # send  notifications
+    if [[ "${env}" == +($criticalEnvs) ]]; then
+       util::sendNotification "CRITICAL" "$subject" "$body" "psadmin@company.com"
+    else
+       util::sendNotification "WARN" "$subject" "$body" "psadmin@company.com"
+    fi
+  done
+done
+done

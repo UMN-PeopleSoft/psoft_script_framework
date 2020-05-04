@@ -1,0 +1,288 @@
+---
+# PSSA defaults for secured passwords
+
+## Common passwords for all web domains
+##############
+# Admin console user
+#webserver_admin_user : "system"
+webserver_admin_user_pass : "{{ vault_webserver_admin_user_pass }}"
+webserver_operator_pass : "{{ vault_webserver_operator_pass }}"
+# Though this is for IB, defined for the Weblogic PIA installer
+#webserver_ib_gw_user : "administrator"
+webserver_ib_gw_pass : "{{ vault_webserver_ib_gw_pass }}"
+# App server Domain/connect password
+webserver_connect_pass : "{{ vault_webserver_connect_pass }}"
+# PSoft user to access web profile, locked to PSWEBSERVER
+#webserver_profile_user : "PTWEBSERVER"
+webserver_profile_pass : "{{ vault_webserver_profile_pass }}"
+# IB User ID Password
+webserver_ib_node_pass : "{{ vault_webserver_ib_node_pass }}"
+# Keystore pass
+webdomain_keystore_pass : "{{ vault_webdomain_keystore_pass }}"
+
+## Common passwords for all App/Scheduler domains
+#############
+# PS User that starts domains
+appserver_boot_user_pass : "{{ vault_appserver_boot_user_pass }}"
+# Connect ID's password (umn)
+appserver_connect_pass : "{{ vault_appserver_connect_pass }}"
+# Domain password
+appserver_domain_pass : "{{ vault_appserver_domain_pass }}"
+
+# MonitorDB PSSADBA passwd
+monitoring_db_user_pass: "{{ vault_monitoring_db_user_pass }}"
+
+## Maintenance opertations supported passwords
+ps_admin_pass: "{{ vault_ps_admin_pass }}"
+rundeck_api_pass: "{{ vault_rundeck_api_pass }}"
+f5_admin_pass: "{{ vault_f5_admin_pass }}"
+oem_super_pass: "{{ vault_oem_super_pass }}"
+
+# vault pass, used for batch processes
+ansible_vault_pass : "{{ vault_ansible_vault_pass }}"
+
+## new granular password management, if not set, will use passwords above
+
+psoft_pass:  {
+   db: {
+      csumn: {
+        pass: "{{ vault_psoft_pass.db.csumn.pass }}"
+      },
+      csdmn: {
+        pass: "{{ vault_psoft_pass.db.csdmn.pass }}"
+      },
+      csdmo: {
+        pass: "{{ vault_psoft_pass.db.csdmo.pass }}"
+      },
+      csdev: {
+        pass: "{{ vault_psoft_pass.db.csdev.pass }}"
+      },
+      cstst: {
+        pass: "{{ vault_psoft_pass.db.cstst.pass }}"
+      },
+      csqat: {
+        pass: "{{ vault_psoft_pass.db.csqat.pass }}"
+      },
+      csprd: {
+        pass: "{{ vault_psoft_pass.db.csprd.pass }}"
+      },
+      csper: {
+        pass: "{{ vault_psoft_pass.db.csper.pass }}"
+      },
+      csfix: {
+        pass: "{{ vault_psoft_pass.db.csfix.pass }}"
+      },
+      csupg: {
+        pass: "{{ vault_psoft_pass.db.csupg.pass }}"
+      },
+      cstrn: {
+        pass: "{{ vault_psoft_pass.db.cstrn.pass }}"
+      },
+      cscls: {
+        pass: "{{ vault_psoft_pass.db.cscls.pass }}"
+      },
+      fsumn: {
+        pass: "{{ vault_psoft_pass.db.fsumn.pass }}"
+      },
+      fsdmn: {
+        pass: "{{ vault_psoft_pass.db.fsdmn.pass }}"
+      },
+      fsdmo: {
+        pass: "{{ vault_psoft_pass.db.fsdmo.pass }}"
+      },
+      fsdev: {
+        pass: "{{ vault_psoft_pass.db.fsdev.pass }}"
+      },
+      fstst: {
+        pass: "{{ vault_psoft_pass.db.fstst.pass }}"
+      },
+      fsqat: {
+        pass: "{{ vault_psoft_pass.db.fsqat.pass }}"
+      },
+      fsqrpt: {
+        pass: "{{ vault_psoft_pass.db.fsqrpt.pass }}"
+      },
+      fsprd: {
+        pass: "{{ vault_psoft_pass.db.fsprd.pass }}"
+      },
+      fsrpt: {
+        pass: "{{ vault_psoft_pass.db.fsrpt.pass }}"
+      },
+      fsper: {
+        pass: "{{ vault_psoft_pass.db.fsper.pass }}"
+      },
+      fsfix: {
+        pass: "{{ vault_psoft_pass.db.fsfix.pass }}"
+      },
+      fsupg: {
+        pass: "{{ vault_psoft_pass.db.fsupg.pass }}"
+      },
+      fstrn: {
+        pass: "{{ vault_psoft_pass.db.fstrn.pass }}"
+      },
+      fscls: {
+        pass: "{{ vault_psoft_pass.db.fscls.pass }}"
+      },
+      hrumn: {
+        pass: "{{ vault_psoft_pass.db.hrumn.pass }}"
+      },
+      hrdmn: {
+        pass: "{{ vault_psoft_pass.db.hrdmn.pass }}"
+      },
+      hrdmo: {
+        pass: "{{ vault_psoft_pass.db.hrdmo.pass }}"
+      },
+      hrdev: {
+        pass: "{{ vault_psoft_pass.db.hrdev.pass }}"
+      },
+      hrtst: {
+        pass: "{{ vault_psoft_pass.db.hrtst.pass }}"
+      },
+      hrqat: {
+        pass: "{{ vault_psoft_pass.db.hrqat.pass }}"
+      },
+      hrprd: {
+        pass: "{{ vault_psoft_pass.db.hrprd.pass }}"
+      },
+      hrper: {
+        pass: "{{ vault_psoft_pass.db.hrper.pass }}"
+      },
+      hrfix: {
+        pass: "{{ vault_psoft_pass.db.hrfix.pass }}"
+      },
+      hrupg: {
+        pass: "{{ vault_psoft_pass.db.hrupg.pass }}"
+      },
+      hrtrn: {
+        pass: "{{ vault_psoft_pass.db.hrtrn.pass }}"
+      },
+      hrcls: {
+        pass: "{{ vault_psoft_pass.db.hrcls.pass }}"
+      },
+      ihumn: {
+        pass: "{{ vault_psoft_pass.db.ihumn.pass }}"
+      },
+      ihdmn: {
+        pass: "{{ vault_psoft_pass.db.ihdmn.pass }}"
+      },
+      ihdmo: {
+        pass: "{{ vault_psoft_pass.db.ihdmo.pass }}"
+      },
+      ihdev: {
+        pass: "{{ vault_psoft_pass.db.ihdev.pass }}"
+      },
+      ihtst: {
+        pass: "{{ vault_psoft_pass.db.ihtst.pass }}"
+      },
+      ihqat: {
+        pass: "{{ vault_psoft_pass.db.ihqat.pass }}"
+      },
+      ihprd: {
+        pass: "{{ vault_psoft_pass.db.ihprd.pass }}"
+      },
+      ihper: {
+        pass: "{{ vault_psoft_pass.db.ihper.pass }}"
+      },
+      ihfix: {
+        pass: "{{ vault_psoft_pass.db.ihfix.pass }}"
+      },
+      ihupg: {
+        pass: "{{ vault_psoft_pass.db.ihupg.pass }}"
+      }
+   },
+   ibadmin: {
+      pt855: {
+        pass: "{{ vault_psoft_pass.ibadmin.pt855.pass }}"
+      },
+      pt856: {
+        pass: "{{ vault_psoft_pass.ibadmin.pt856.pass }}"
+      },
+      pt857: {
+        pass: "{{ vault_psoft_pass.ibadmin.pt857.pass }}"
+      }
+
+   },
+   webadmin: {
+      pt855: {
+        pass: "{{ vault_psoft_pass.webadmin.pt855.pass }}"
+      },
+      pt856: {
+        pass: "{{ vault_psoft_pass.webadmin.pt856.pass }}"
+      },
+      pt857: {
+        pass: "{{ vault_psoft_pass.webadmin.pt857.pass }}"
+      }
+   },
+   webprofile: {
+      pt855: {
+        pass: "{{ vault_psoft_pass.webprofile.pt855.pass }}"
+      },
+      pt856: {
+        pass: "{{ vault_psoft_pass.webprofile.pt856.pass }}"
+      },
+      pt857: {
+        pass: "{{ vault_psoft_pass.webprofile.pt857.pass }}"
+      }
+   },
+   appadmin: {
+      pt855: {
+        pass: "{{ vault_psoft_pass.appadmin.pt855.pass }}"
+      },
+      pt856: {
+        pass: "{{ vault_psoft_pass.appadmin.pt856.pass }}"
+      },
+      pt857: {
+        pass: "{{ vault_psoft_pass.appadmin.pt857.pass }}"
+      }
+   },
+   appbootuser: {
+      pt855: {
+        pass: "{{ vault_psoft_pass.appbootuser.pt855.pass }}"
+      },
+      pt856: {
+        pass: "{{ vault_psoft_pass.appbootuser.pt856.pass }}"
+      },
+      pt857: {
+        pass: "{{ vault_psoft_pass.appbootuser.pt857.pass }}"
+      }
+   },
+   appdomain: {
+      pt855: {
+        pass: "{{ vault_psoft_pass.appdomain.pt855.pass }}"
+      },
+      pt856: {
+        pass: "{{ vault_psoft_pass.appdomain.pt856.pass }}"
+      },
+      pt857: {
+        pass: "{{ vault_psoft_pass.appdomain.pt857.pass }}"
+      }
+   }
+
+}
+
+# DB client by Tools Versions
+psoft_db_client: {
+   pt855: {
+      version: "12.1.0.2b/client_1"
+   },
+   pt856: {
+      version: "12.2.0/client_1"
+   },
+   pt857: {
+      version: "12.2.0/client_1"
+   }
+
+}
+
+# Cobol Compiler Versions
+psoft_cobol: {
+   pt855: {
+      version: "5.1wp11"
+   },
+   pt856: {
+      version: "5.1wp15"
+   },
+   pt857: {
+      version: "vc4.0pu4"
+   }
+}

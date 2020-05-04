@@ -1,0 +1,166 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : stopDomain
+## Description : stop a PeopleSoft domain. Will include additional steps like,
+##               web pool member in OTD, remove blackout in OEM, verify proper
+##               stopup of processes.  Only need to provide -t if stopping a
+##               domain of same name on older tools version.  Use -z to force
+##               down an app server domain.
+## Author      : Nate Werner
+## Created     : 11/09/2017
+## Updated     :
+################################################################################
+## Syntax      : stopDomain -d <domainName> [-n <serverName>] [-t <major tools version>]
+##                  [-m] [-z] [-v] [-h]
+## Parameters  : -d <domainName>  : Domain name to stop
+##             : -n <serverName>  : Processss scheduler server name if stoping
+##                   a server other than PSUNX.
+##             : -t <major tools version> : If not provided assumes most current
+##                   else searches for specified version of domain (ie:8.54)
+##             : -m  : If an app server domains clear all cache before stoping.
+##             : -z  : force app server domain to stop, default is graceful stop.
+##             : -b <num> : override default blackout, 0 is indefinite, no ending
+## Example     : stopDomain -d acsdev1
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/monitor.sh
+source $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+domainName=""
+serverName=""
+majorToolsVer=""
+clearCache=0
+forceStop=0
+stopCoherence=0
+blackoutDur=$MAINT_DEF_BLACKOUT_DUR
+debugFlag="n"
+declare -A domAttribs
+exitCode=0
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  stopDomain -d <domainName> [-n <serverName>] [-t <major tools version>] [-m] [-z] [-v] [-h]"
+   echo "     Stop a PeopleSoft domain.  Defalt behavior will stop the most current tools"
+   echo "     version of the domain, adding/enabling web domains in OTD, app server cache is"
+   echo "     not clear, but web/prcs domains are always cleared.  Use -m to also clear app"
+   echo "     server cache.  Use -z to force app server domains down, without waiting for"
+   echo "     instances to complete in-flight requests. Use -b to override default OEM"
+   echo "     blackout of $MAINT_DEF_BLACKOUT_DUR mins.  0 will create a non-ending blackout."
+   echo " Parameters"
+   echo "     -d <domainName>  : (Required) Name of domain to stop"
+   echo "     -n <serverName>  : (Optional/Required) Name of scheduler if not stoping PSUNX"
+   echo "     -t <maj_tools_ver>: (Optional) Tools version of the domain if not the most current"
+   echo "     -m               : (Optional) Clear cache for app server domain"
+   echo "     -c               : (Optional) Stop Coherence cache server on domain"
+   echo "     -z               : (Optional) Force shutdown of app server domains, default gracefull"
+   echo "     -b <num>         : (Optional) Override the blackout duration, default $MAINT_DEF_BLACKOUT_DUR mins"
+   echo "     -v               : Enable debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: stopDomain -d acsdev1"
+   echo
+   exit
+
+}
+
+## Main program
+
+# get user's paramters
+while getopts ":vhmczb:t:n:d:" optname
+  do
+    case "$optname" in
+      "d")
+        domainName=$OPTARG
+        ;;
+      "n")
+        serverName=$OPTARG
+        ;;
+      "t")
+        majorToolsVer=$OPTARG
+        ;;
+      "m")
+        clearCache=1
+        ;;
+      "b")
+        blackoutDur=$OPTARG
+        ;;
+      "z")
+        forceStop=1
+        ;;
+      "c")
+        stopCoherence=1
+        ;;
+      "v")
+        debugFlag="y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ -z "$domainName" ]]; then
+  echo "Domain Name is required."
+  usageInfo
+fi
+
+# setup log file for process
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/stopDomain_${domainName}_$currentDate.log"
+util::setLogFile "$maintLogFile"
+util::log "DEBUG" "****Starting stopDomain for ${domainName}"
+
+# if tools version was not provided, get most current
+if [[ -z "$majorToolsVer" ]]; then
+  majorToolsVer=$( inventory::getCurrentTools "$domainName")
+fi
+
+# setup vault access
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+
+# first create OEM blackout for domain
+monitor::startBlackout "${domainName}" "${serverName}" "$blackoutDur"
+
+util::log "DEBUG" "Calling maint::stopDomain ${domainName}${serverName} ${majorToolsVer} ${clearCache} ${stopCoherence}  ${forceStop} ${debugFlag} ${maintLogFile}"
+maint::stopDomain "${domainName}${serverName}" "${majorToolsVer}" "${clearCache}" "${stopCoherence}" "${forceStop}" "${debugFlag}" "${maintLogFile}"
+if [ $? -ne 0 ]; then
+  echo "*******"
+  util::log "ERROR" "The command \"maint::stopDomain ${domainName}${serverName} ${majorToolsVer}\" did not run to success, check logs"
+  echo "*******"
+  exitCode=1
+fi
+
+util::log "DEBUG" "****Completed stopDomain for ${domainName}"
+util::log "INFO" "Details of the stop operation can be found in $maintLogFile"
+exit ${exitCode}
+#END

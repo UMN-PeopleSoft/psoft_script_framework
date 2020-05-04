@@ -1,0 +1,241 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : stopAppEnv
+## Description : Stop PeopleSoft domains in an app/env. Will include additional
+##               steps like, web pool member in OTD, add blackout in OEM,
+##               verify proper stutdown of processes.  Only need to provide -t if
+##               stopping a domain of same name on older tools version.
+##               -m to clear cache for app domains.
+## Author      : Nate Werner
+## Created     : 11/15/2017
+## Updated     :
+################################################################################
+## Syntax      : stopAppEnv -a <appCode> -e <envCode> -t <major tools version>]
+##                  [-y <type>] [-m] [-v] [-h]
+## Parameters  : -a <app code>  : Filter by application
+##             : -e <env code>  : Filter by environment
+##             : -t <major tools version> : If not provided assumes most current
+##                   else searches for specified version of domain (ie:8.54)
+##             : -y <type>: Filter selection by type (web,app,prc), default: all
+##             : -m  : If an app server domains clear all cache before starting.
+##             : -b <mins> : Override the default blackout duration of 10 mins.
+##             : -i <"blackout info"> : Description/Reason of shutdown.
+##             : -z : Force app server domains down, default is graceful shutdown
+##             : -u <purpose> main, ib, ren, trace"
+##             :
+## Example     : stopAppEnv -a cs -e qat -b 20 -i "Applying Tools patch"
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/monitor.sh
+source $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+app=""
+env=""
+majorToolsVer=""
+domainType="all"
+# turn off all optional features by default
+clearCache=0
+blackoutDur=$MAINT_DEF_BLACKOUT_DUR
+blackoutDescr=""
+forceStop=0
+stopCoherence=0
+skipTrace=0
+purpose=""
+debugFlag="n"
+declare -A domAttribs
+domainList=()
+exitCode=0
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  stopAppEnv -a <app_code> -e <env_code> [-t <major tools version>] [-m] [-b <mins>] [-i <"descr">] [-c] [-z] [-v] [-h]"
+   echo "     Start all domains in a specific app/env.  Defalt behavior will start"
+   echo "     the most current tools version of the domain, adding/enabling web "
+   echo "     domains in OTD, app server cache is not clear, but web/prcs domains"
+   echo "     are always cleared.  Use -m to also clear app server cache.  Use -o"
+   echo "     to not enable web domains in OTD."
+   echo " Parameters"
+   echo "     -a <app_code>    : (Required) Filter for an application (cs,fs,hr,ih)"
+   echo "     -e <env_code>    : (Required) Filter for environment"
+   echo "                          (dmo,dmn,umn,dev,tst,qat,fix,per,trn,cls,prd,upg,qrpt,rpt)"
+   echo "     -t <maj_tools_ver>: (Optional) Tools version of the domain if not the most current"
+   echo "     -y <type>        : (Optional) Domain type to filter on (web,app,prc)"
+   echo "     -m               : (Optional) Clear cache for app server domain"
+   echo "     -b <mins>        : (Optional) Override blackout mins, default is 10 mins"
+   echo "     -i <"descr">     : (Optional) Provide more detail for reason of stopping app/env"
+   echo "     -z               : (Optional) Force shutdown of app server domains, default gracefull"
+   echo "     -c               : (Optional) Stop Coherence cache server with web domain"
+   echo "     -g               : (Optional) Do not stop trace domains with other domains"
+   echo "     -u <purpose>     : (Optional) main, ib, ren, trace"
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: stopAppEnv -a cs -e qat -b 20 -i "Applying Tools patch""
+   echo "             stops the cs qat domains in parallel with blackout of 20 mins"
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":vhzcgmb:i:y:t:e:a:u:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "t")
+        majorToolsVer=$OPTARG
+        ;;
+      "y")
+        domainType=$OPTARG
+        ;;
+      "b")
+        blackoutDur=$OPTARG
+        ;;
+      "m")
+        clearCache=1
+        ;;
+      "i")
+        blackoutDescr=$OPTARG
+        ;;
+      "z")
+        forceStop=1
+        ;;
+      "g")
+        skipTrace=1
+        ;;
+      "c")
+        stopCoherence=1
+        ;;
+      "u")
+        purpose=$OPTARG
+        ;;
+      "v")
+        debugFlag="y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ -z "$app" || -z "$env" ]]; then
+  echo "App and Env code is required."
+  usageInfo
+fi
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/stopAppEnv_${app}${env}_$currentDate.log"
+util::setLogFile "$maintLogFile"
+util::log "DEBUG" "****Starting stopAppEnv for ${app}${env}"
+
+# set defaults
+if [[ -z "$domainType" ]]; then
+  domainType="all"
+fi
+# if tools version was not provided, get most current
+if [[ -z "$majorToolsVer" ]]; then
+  majorToolsVer=$( inventory::getCurrentToolsAppEnv "$app" "$env" "$domainType")
+fi
+util::log "DEBUG" "stopAppEnv: Selected tools version: $majorToolsVer"
+
+# get array of domains in app/env
+util::log "DEBUG" "Calling domain::getDomainsByEnv $app $env $domainType $purpose $majorToolsVer"
+inventory::getDomainsByEnv "$app" "$env" "$domainType" "$purpose" "$majorToolsVer" domainList
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Invalid app/env selected (domain::getDomainsByEnv)"
+  exit 1
+else
+  util::log "INFO" "****Initiating shutdown for $domainType $app $env $purpose"
+
+  # setup vault access
+  export ANSIBLE_LOG_PATH=/dev/null
+  sec::getandStoreVaultAccess
+  if [[ $? -ne 0 ]]; then
+    util::log "ERROR" "Unable to setup vault access"
+    exit 1
+  fi
+  if [[ $skipTrace -eq 1 ]]; then
+    # remove trace domains from list
+    for index in ${!domainList[@]}; do
+      if [[ "${domainList[$index]}" =~ t[0-9] && ! "${domainList[$index]}" =~ tst[0-9] && ! "${domainList[$index]}" =~ rpt[0-9] && ! "${domainList[$index]}" =~ qat[0-9] ]]; then
+        unset 'domainList[index]'
+      fi
+    done
+  fi
+  # Start blackout for app/env
+  util::log "DEBUG" "Calling monitor::startBlackoutAppEnv $app $env"
+  monitor::startBlackoutAppEnv "$app" "$env" "$blackoutDur" "$blackoutDescr"
+
+  # Create list of parameters from domain list for stopDomain
+  for domain in ${domainList[@]}; do
+     domainParameters="${domainParameters}${domain} ${majorToolsVer} ${clearCache} ${stopCoherence} ${forceStop} ${debugFlag} ${maintLogFile} "
+  done
+  util::log "DEBUG" "stopAppEnv: Domain Parms: ${domainParameters}"
+
+  # make parallel parse the parameters with field speparator of space
+  IFS=' '
+  ## Now fire off commands in parallel, each command having 7 parameters
+  util::log "DEBUG" "Calling parallel -j 0 -n 7 --joblog jlog_${app}${env} --line-buffer maint::stopDomain {1} {2} {3} {4} {5} {6} {7}"
+  parallel -j 0 -n 7 --joblog jlog_${app}${env} --line-buffer maint::stopDomain {1} {2} {3} {4} {5} {6} {7} ::: $domainParameters
+  parallelExit=$?
+  if [[ $parallelExit -ne 0 ]]; then
+    util::log "ERROR" "Parallel command failed with exit code: $parallelExit , out of space/memory?"
+  fi
+  util::log "DEBUG" "Parallel command log output: "
+  cat jlog_${app}${env} >> $maintLogFile
+
+  IFS=$'\n'
+  # Check parallel job log (jlog) for any errors
+  errorList=( $( grep -v '0'$'\t''0' jlog_${app}${env} | grep -v JobRuntime ) )
+  if [[ -n "$errorList" ]]; then
+    for process in ${errorList[@]}; do
+       failedCommand=$( echo $process | awk -F' ' '{ print $9" "$10" "$11 }' )
+       echo "*******"
+       util::log "ERROR" "The parallel command for \"$failedCommand\" did not run to success, check logs"
+       echo "*******"
+       exitCode=1
+    done
+  fi
+
+  echo
+  util::log "INFO" "****Completed shutdown for $domainType $app $env"
+
+  #remove log file
+  rm -f jlog_${app}${env}
+fi
+
+util::log "DEBUG" "****Completed stopAppEnv for ${app}${env}"
+util::log "INFO" "Details of the stopAppEnv operation can be found in $maintLogFile"
+exit ${exitCode}
+#END

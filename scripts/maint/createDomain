@@ -1,0 +1,257 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : createDomain
+## Description : Create a new web/app/sched domain using ansible
+## Author      : Nate Werner
+## Created     : 7/13/2018
+##
+################################################################################
+##
+## Syntax      : createDomain -d <name> -a <appCode> -e <envCode> -y <domType> -u <purpose>
+##                 -r <Y/N> -k <hostName> -t <new_tools_version> -w <new_weblogic_version> -vhf
+## Parameters  :   name = new domain name (unique for all domains except schedulers, see serverName)
+##             :   appCode = 2 char app code
+##             :   envCode = 3 char env code
+##             :   domType = app, web, prc
+##             :   purpsoe = main,ib,ren
+##             :   -r <Y/N = Y = Reporting domain
+##             :   hostName = hostname to install domain on
+##             :   new_tools_version = full version of tools the domain will be patched to
+##             :   new_weblogic_version = full version of weblogic the domain will upgrade to for web domain
+## Example     : createDomain -d csdev1 -a cs -e dev -y web -u main -r N -k psweb-dev01 -t 8.55.20  -w 12.1.3.0.7
+##
+################################################################################
+
+### Help Instructions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  createDomain will create a new domain to a new tools and/or weblogic patch level"
+   echo "  using ansible playbook to create the domain."
+   echo " Parameters"
+   echo "     -d <name>      : domain name (unique for all domains except schedulers, see serverName)"
+   echo "     -n <serverName>: (Optional) Name of scheduler, like PSUNX, if creating a Scheduler domain"
+   echo "     -a <App Code>  : (Required) 2 char app code: cs, fs, hr, ih"
+   echo "     -e <Env Code>  : (Required) 3 char env code: dev,tst,qat,prd,per,fix,upg,trn,cls,dmo,dmn,umn,tec"
+   echo "     -y <Dom Type>  : (Required) app, web, prc, appweb, or all for all types, default = all"
+   echo "     -u <purpose>   : (Required) main, ib, ren, trace"
+   echo "     -r <Report Y/N>: (Optional) Y=reporting env, N=normal, default=N"
+   echo "     -k <hostName>  : (Required) Host to deploy domain on"
+   echo "     -t <new_tools_version> : full version of tools the domain will be patched to"
+   echo "     -w <new_weblogic_version> : full version of weblogic the domain will upgrade to, type = web"
+   echo "     -f             : Boot domain after creating (default: leave domain down if stopped"
+   echo "     -v             : Enable ansible debug/verbose mode"
+   echo "     -h             : Display this help"
+   echo
+   TOOLS_VERSION_LIST=`find /psoft/admin/gold/tools/8.* -maxdepth 0 -printf ','%f -type d`
+   echo "Valid Tools options are: $TOOLS_VERSION_LIST"
+   WEBLOGIC_VERSION_LIST=`find /psoft/admin/gold/weblogic/1* -maxdepth 0 -printf ','%f -type d`
+   echo "Valid Weblogic options are: $WEBLOGIC_VERSION_LIST"
+   exit 1
+}
+
+commandParms="$@"
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+source $LIB_HOME/ansible.sh
+
+##### Variable and defaults
+# Set in bootstrap:
+#   ANSIBLE_HOME
+#   DOMAIN_LIST
+#   MAINT_HOME
+#   SCRIPT_HOME
+
+playbookFile="create_domain.yml"
+debugFlag=""
+domainName=""
+serverName="NA"
+app=""
+env=""
+domainType=""
+purpose=""
+domainHost=""
+newToolsVersion=""
+newWeblogicVersion=""
+bootDomain=""
+bootVar=""
+reporting="N"
+
+##### Prompt processing and validation
+while getopts "hvfd:a:e:y:u:r:k:t:w:n:" optname
+  do
+    case "$optname" in
+      "d")
+        domainName=$OPTARG
+        ;;
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "y")
+        domainType=$OPTARG
+        ;;
+      "n")
+        serverName=$OPTARG
+        ;;
+      "u")
+        purpose=$OPTARG
+        ;;
+      "r")
+        reporting=$OPTARG
+        ;;
+      "k")
+        domainHost=$OPTARG
+        ;;
+      "t")
+        newToolsVersion=$OPTARG
+        ;;
+      "w")
+        newWeblogicVersion=$OPTARG
+        ;;
+      "f")
+        bootDomain="True"
+        ;;
+      "v")
+        debugFlag="-vvv"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+  done
+
+## Main
+
+newShortToolsVersion="${newToolsVersion:0:4}"
+# Calculate run duration
+bash_start=$(date +%s)
+currentDate="$(date +%y%m%d_%H%M )"
+
+# standard logging
+patchLogFile="$PS_SCRIPT_BASE/logs/maint/createDomain_${domainName}_$currentDate.log"
+util::setLogFile "$patchLogFile"
+util::log "DEBUG" "****Running $commandParms"
+
+# verifiy required fields
+if [[ -z "$domainName" ]]; then
+  util::log "ERROR" "Domain Name is required."
+  usageInfo
+fi
+if [[ -z "$newToolsVersion" ]]; then
+  util::log "ERROR" "New PeopleTools version is required."
+  usageInfo
+fi
+if [[ -z "$app" || -z "$env" || -z "$domainType" || -z "$purpose" || -z "$domainHost" ]]; then
+  util::log "ERROR" "App Code, Env Code, Domain Type, Purpose, and Domain Host are required."
+  usageInfo
+fi
+
+# map reporting env
+if [[ "$env" == "qrpt" ]]; then
+   env="qat"
+   reporting="Y"
+elif [[ "$env" == "rpt" ]]; then
+   env="prd"
+   reporting="Y"
+fi
+
+#### Update and check domain list
+echo
+$MAINT_HOME/syncDomainList -d $domainName
+echo
+
+# verify host is in host inventory (ran bootstrap)
+match=$( cat $CONFIG_HOME/inventory/host.list | grep $domainHost )
+if [ $? -ne 0 ]; then
+  util::log "ERROR" "Invalid target host specified for domain"
+  exit 1
+fi
+
+# calculate scheduler server name
+if [[ "$domainType" == "prc" ]]; then
+  hostSeq=${domainHost:(-1)}
+  if [ $hostSeq -gt 1 ]; then
+    serverName="PSUNX${hostSeq}"
+  else
+    serverName="PSUNX"
+  fi
+fi
+
+## now add/check domain
+util::log "INFO" "Adding domain $domainName to inventory"
+inventory::addDomain "$domainName" "$domainType" "$app" "$env" "$reporting" "$purpose" "$serverName" "$domainHost" "$newToolsVersion" "$newWeblogicVersion"
+addResult=$?
+if [[ $addResult -ne 0 ]]; then
+  if [[ $addResult -eq 2 ]]; then
+    util::log "ERROR" "Domain $domainName already exists, use updateDomain instead, if applying changes"
+  elif [[ $addResult -eq 3 ]]; then
+    util::log "ERROR" "Domain $domainName already exists at the same patch level, use updateDomain instead, if applying changes"
+  fi
+  exit 1
+fi
+
+###### Ansible processing
+# setup vault access (allows vault password to be sent from Rundeck)
+util::log "INFO" "Setting up vault access..."
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+
+# Setup log file for playbook, using same log file as this script
+export ANSIBLE_LOG_PATH=$patchLogFile
+
+# First, dynamically configure the playbook based on the domain being created
+ansible::dynConfigPlaybook "$domainType" "$domainHost" "$playbookFile"
+
+if [ -n "$bootDomain" ]; then
+  bootVar="boot_domain=$bootDomain"
+else
+  bootVar=""
+fi
+
+# Run the ansible playbook
+extraVars="filter_name=$domainName filter_tools_ver=$newShortToolsVersion $bootVar"
+# Run playbook
+ansible::runPlaybook "$extraVars" "$debugFlag" "$playbookFile"
+
+### Addtional summary output
+bash_end=$(date +%s)
+runtime=$(python -c "print '%u:%02u' % ((${bash_end} - ${bash_start})/60, (${bash_end} - ${bash_start})%60)")
+domainsAdded=$(echo "${domainName}" | sed 's/\n/\n   /g')
+util::log "INFO"  "Domains added: "
+util::log "INFO"  "   $domainsAdded"
+util::log "INFO"  "Run Time: $runtime"
+util::log "INFO"  "Failed Tasks:"
+failList=$( grep -B 1 "fatal" $patchLogFile )
+if [ -z "$failList" ]; then
+   util::log "INFO" "   No Failed Tasks"
+else
+   util::log "ERROR" "   $failList"
+   exit 1
+fi
+
+# Completed domain deployment

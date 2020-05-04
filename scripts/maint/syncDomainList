@@ -1,0 +1,286 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : syncDomainList
+## Description : check all existing domains and resync properites to the domains.list
+##             : file.  Used for domains management.  This must be ran from
+##             : the special monitor VMs (psapp-tstm01 or psapp-prdm01).
+## Author      : Nate Werner
+## Created     : 12/10/2015
+##
+## Updated     : 10/18/2019 - Rewrote to support new VMWare platform for Peoplesoft.
+##                  Inplemented new approach using parallel command to remotely
+##                  capture all domains from hosts at once.  The filters will be
+##                  used to intelligently only pull domain info for hosts that apply
+##                  to the specified filter.  For app/env filters, the assumption
+##                  is all domains for an env will be on a host with the name
+##                  having the environment code.  This means all envs must have
+##                  their own VMs.
+################################################################################
+##
+## Syntax      : syncDomainList
+## Parameters  :   (filters)
+##                 app
+##                 env
+##                 type
+##                 name
+## Example     : syncDomainList fs dev web fsdev1
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+
+## Globals
+inApp=""
+inEnv=""
+inDomainName=""
+inDomainType=""
+dryRun=""
+syncLogFile=""
+domainString=""
+scriptParms="$@"
+
+# Use SSH_CMD from maint config vars (no host key checking)
+SSH_OPTIONS="${SSH_CMD} -o PreferredAuthentications=publickey -q "
+
+hostlist=()
+domainList=()
+domainInfo=()
+exitCode=0
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  syncDomainList [-a <ap>] [-e <env>] [-y <type>] [-d <domainName>] [-v] [-h]"
+   echo "     check all existing domains and resync properites to the domains.list"
+   echo "     file, based on the host.list file.  Used for domains management."
+   echo " Parameters"
+   echo "     -a <app>         : (Optional) Application code"
+   echo "     -e <env>         : (Optional) Environment code"
+   echo "     -y <type>        : (Optional) Type of domains: app, web, prc"
+   echo "     -d <domainName>  : (Optional) Name of domain to start"
+   echo "     -v               : (Optional) Debug/dry run, only ouput domain list"
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: syncDomainList -d csdev2 "
+   echo "                Resyncs the info for csdev2 web domain."
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":hvy:d:a:e:" optname; do
+    case "$optname" in
+      "d")
+        inDomainName=$OPTARG
+        ;;
+      "a")
+        inApp=$OPTARG
+        ;;
+      "e")
+        inEnv=$OPTARG
+        ;;
+      "y")
+        inDomainType=$OPTARG
+        ;;
+      "v")
+        dryRun="Y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+        # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+# Validate Input
+if [ -n "$inDomainType" ]; then
+  if [[ ! "$ATTR_TYPE_LIST" =~ ",${inDomainType}," ]]; then
+    util::log "ERROR" "Invalid Domain Type of $inDomainType, Valid options are: ${ATTR_TYPE_LIST:1}"
+    return 1
+  fi
+fi
+if [ -n "$inEnv" ]; then
+  if [[ ! "$ATTR_ENV_LIST" =~ ",${inEnv}," ]]; then
+    util::log "ERROR" "Invalid Environment of $inEnv, Valid options are: ${ATTR_ENV_LIST:1}"
+    return 1
+  fi
+fi
+if [ -n "$inApp" ]; then
+  if [[ ! "$ATTR_APP_LIST" =~ ",${inApp}," ]]; then
+    util::log "ERROR" "Invalid Application of $inApp, valid options are: ${ATTR_APP_LIST:1}"
+    return 1
+  fi
+fi
+
+# Logging setup
+currentDate="$(date +%y%m%d_%H%M )"
+syncLogFile="$PS_SCRIPT_BASE/logs/maint/syncDomainList_${inApp}_${inEnv}_${inDomainName}_$currentDate.log"
+util::setLogFile "$syncLogFile"
+util::log "DEBUG" "****Running syncDomainList $scriptParms"
+
+# Build list of hosts to find domains on
+# looking for an existing domain, getting most current version info
+if [[ -n "$inDomainName" ]]; then
+  hostList=( "$( grep "^$inDomainName " $DOMAIN_LIST | awk '{ print $8 }' | uniq )" )
+# Filter by env code in host name and type
+elif [[ -n "$inDomainType" && -n "$inEnv" ]]; then
+  hostList=( "$( egrep "$inEnv|dbg" $CONFIG_HOME/inventory/host.list | egrep "$inDomainType|app" | grep -v "els" | grep -v guest | grep -v "mgmt" )" )
+# Filter by env code in host
+elif [[ -n "$inEnv" ]]; then
+  hostList=( "$( egrep "$inEnv|dbg" $CONFIG_HOME/inventory/host.list | grep -v "els" | grep -v guest | grep -v "mgmt" )" )
+# read all hosts
+else
+  hostList=( "$( cat $CONFIG_HOME/inventory/host.list | grep -v "els" | grep -v "guest" | grep -v "mgmt"  )" )
+fi
+
+if [[ -z "$hostList" ]]; then
+  # no domain or app/env found, this is a new domain or app/env, no need to sync
+  util::log "DEBUG" "No domain or app/env found skipping filtered sync"
+  exit 0
+fi
+
+util::log "DEBUG" "Finding domains on host list ${hostList[@]}"
+# With the host list now search for all domains running on those hosts in parallel
+# Function inventory::readHostDomains will do the grunt work of returning the domain properties,
+#   for each host. It will echo out the domain strings from all threads to domainList
+oldIFS=$IFS
+IFS=$'\n'
+# debug: --joblog jlog_syncList
+domainList=( $( parallel -j 20 -n 1 "$SSH_OPTIONS {} \"cd $LIB_HOME && source inventory.sh && inventory::readHostDomains\"" ::: $hostList ) )
+resultCode=$?
+if [[ $resultCode != 0 ]]; then
+  util::log "ERROR" "Parallel inventory call failed, host down? Exit code: $resultCode, Output: ${domainList[@]}"
+  exit 1
+fi
+
+util::log "DEBUG" "Found ${#domainList[@]} domains on the host list."
+
+# Debugging/dry run option, jsut display list of domains
+if [[ "$dryRun" == "Y" ]]; then
+  echo "Search domain List results:"
+  echo "${domainList[@]}"
+  exit 0
+fi
+IFS=$oldIFS
+
+# New file lock control, instead of locking each command, we will hold a background lock for the approximate
+#  time it takes to run these changes to the domain list file, no reads can be done while the lock is held.
+if [ ! -e  $INVENTORY_LOCK ]; then
+  touch $INVENTORY_LOCK
+fi
+util::log "INFO" "Checking Inventory lock..."
+if ! $(fcntl-lock -n -x $INVENTORY_LOCK true); then
+   util::log "INFO" "Inventory is locked already. Waiting..."
+   fcntl-lock -s $INVENTORY_LOCK true
+   util::log "INFO" "Inventory lock released, resuming sync domain list..."
+fi
+
+# we'll hold the lock in background for 2 seconds
+util::log "DEBUG" "Running fcntl-lock for 2 seconds"
+fcntl-lock -x $INVENTORY_LOCK sleep 2 &
+
+util::log "INFO" "Re-loading domain inventory"
+# Next, Remove all entries in domain list that we will replace
+
+# Add header to domain.list file if no filter applied
+util::log "DEBUG" "Clearing domain list based on filters"
+if [[ -z "$inApp" && -z "$inDomainName" ]]; then
+   # no filter, start new file
+   echo "Domain Type App Env Rpt Purpose SrvrName Host Tools_Ver Weblogic_Ver" > $DOMAIN_LIST
+else
+  # using filters, remove lines based on filter
+  if [ -n "$inDomainName" ]; then
+     # specified exact domain
+     sed -i "/^$inDomainName /d" $DOMAIN_LIST
+  elif [ -n "$inDomainType" ]; then
+     # specified app env and type
+     sed -i "/$inDdomainType $inApp $inEnv/d" $DOMAIN_LIST
+  elif [ -n "$inEnv" ]; then
+     sed -i "/$inApp $inEnv/d" $DOMAIN_LIST
+  else
+     util::log "ERROR" "Invalid filters"
+     exit 1
+  fi
+fi
+util::log "DEBUG" "Cleared domain list, loading rescanned domains"
+
+# Loop only by newline, not space
+oldIFS=$IFS
+IFS=$'\n'
+# Now loop through the list of domain paths, and parse out parameters we need for domain list
+for domainString in ${domainList[@]}
+do
+
+  # change field separator to space to get each attribute
+  IFS=$' '
+  domainInfo=( $domainString )
+  # Parse out domain info
+  domainName=${domainInfo[0]}
+  domainType=${domainInfo[1]}
+  app=${domainInfo[2]}
+  env=${domainInfo[3]}
+  reporting=${domainInfo[4]}
+  purpose=${domainInfo[5]}
+  serverName=${domainInfo[6]}
+  domainHost=${domainInfo[7]}
+  tools_version=${domainInfo[8]}
+  weblogic_version=${domainInfo[9]}
+
+  # skip found domains not matching the filter
+  if [[ -n "$inDomainName" && "$inDomainName" != "$domainName" ]]; then
+    continue
+  elif [[ -n "$inDomainType" && -n "$inEnv" && "$inDomainType" != "$domainType" && "$inEnv" != "$env" ]]; then
+    continue
+  fi
+
+  # now we have all the domain properties, copy to domain.list
+  # sample: csdev2 web cs dev N main NA psweb-dev02 8.53.10 10.3.6.0.9
+  # dont add testing/POC domains
+  if [[ ! "$domainName" == *poc* && ! "$domainName" == *bak* && ! "$domainName" == *orig* ]]; then
+    if [ -z "$inApp" ]; then
+      # no filter, start new file
+      echo "$domainName $domainType $app $env $reporting $purpose $serverName $domainHost $tools_version $weblogic_version" >> $DOMAIN_LIST
+    else
+      # using filters, remove lines based on filter
+      if [ -n "$inDomainName" ]; then
+         if [ "$inDomainName" == "$domainName" ]; then
+           # specified exact domain
+           echo "$domainName $domainType $app $env $reporting $purpose $serverName $domainHost $tools_version $weblogic_version" >> $DOMAIN_LIST
+         fi
+      elif [ -n "$inDomainType" ]; then
+         if [[ "$inApp" == "$app" && "$inEnv" == "$env" && "$inDomainType" == "$domainType" ]]; then
+           echo "$domainName $domainType $app $env $reporting $purpose $serverName $domainHost $tools_version $weblogic_version" >> $DOMAIN_LIST
+         fi
+      elif [[ -n "$inEnv" && "$inApp" == "$app" && "$inEnv" == "$env" && -z "$inDomainType" ]]; then
+         echo "$domainName $domainType $app $env $reporting $purpose $serverName $domainHost $tools_version $weblogic_version" >> $DOMAIN_LIST
+      fi
+    fi
+
+  fi
+done
+IFS=$oldIFS
+util::log "INFO" "Domain list updated"
+
+#END

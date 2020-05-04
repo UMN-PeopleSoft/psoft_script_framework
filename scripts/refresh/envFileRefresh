@@ -1,0 +1,131 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : envFileRefresh
+## Description : Sync
+## Author      : Nate Werner
+## Created     : 4/21/2020
+## Updated     :
+################################################################################
+## Syntax      : envFileRefresh -a <appCode> -e <TargetenvCode> [-s <SourceEnvCode>] [-v] [-h]
+## Parameters  : -a <app code>  : Filter by application
+##             : -e <target env>  : Target environment for refresh
+##             : -s <source env> : (optional) Source env for refresh, defaults to prd
+##             :
+## Example     : envFileRefresh -a cs -e qat
+##             : envFileRefresh -a cs -e per -s qat
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/inventory.sh
+
+# Script variables/defaults
+app=""
+targetEnv=""
+sourceEnv="prd"
+debugFlag="n"
+goldFilesPath="/psoft/admin/gold"
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  envFileRefresh -a <appCode> -e <TargetenvCode> [-s <SourceEnvCode>] [-v] [-h]"
+   echo "     Copy library/source files in the apps and appscust folder from source to target."
+   echo "     Default source is prd"
+   echo " Parameters"
+   echo "     -a <app_code>    : (Required) Filter for an application (cs,fs,hr,ih)"
+   echo "     -e <target env>  : (Required) Target environment for refresh"
+   echo "                          (dmo,dmn,umn,dev,tst,qat,fix,per,trn,cls,upg,qrpt,rpt)"
+   echo "     -s <source env> : (optional) Source env for refresh, defaults to prd"
+   echo "     -v               : Enable debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: envFileRefresh -a cs -e qat"
+   echo "        envFileRefresh -a cs -e per -s qat"
+
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's parameters
+while getopts ":vhs:e:a:s:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        targetEnv=$OPTARG
+        ;;
+      "s")
+        sourceEnv=$OPTARG
+        ;;
+      "v")
+        debugFlag="y"
+        export debugFlag
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ ( -z "$app" || -z "$targetEnv" ) ]]; then
+  echo "App and Env code is required."
+  usageInfo
+fi
+
+if [[ "$targetEnv" == "prd" ]]; then
+  echo "Cannot set target to PRD!"
+fi
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/envFileRefresh_${app}${targetEnv}${sourceEnv}_$currentDate.log"
+util::log "DEBUG" "****Starting envFileRefresh for ${app}${targetEnv} from ${sourceEnv}"
+
+######
+
+# Copy sqr and cobol source from source to target in gold folders:
+rsync -ai $goldFilesPath/appscust/${app}${sourceEnv}/sqr/* $goldFilesPath/appscust/${app}${targetEnv}/sqr/
+rsync -ai $goldFilesPath/appscust/${app}${sourceEnv}/src/cbl/* $goldFilesPath/appscust/${app}${targetEnv}/src/cbl/
+rsync -ai $goldFilesPath/appscust/${app}${sourceEnv}/cblbin/* $goldFilesPath/appscust/${app}${targetEnv}/cblbin/
+
+rsync -ai $goldFilesPath/apps/${app}${sourceEnv}/sqr/* $goldFilesPath/apps/${app}${targetEnv}/sqr/
+rsync -ai $goldFilesPath/apps/${app}${sourceEnv}/src/cbl/* $goldFilesPath/apps/${app}${targetEnv}/src/cbl/
+rsync -ai $goldFilesPath/apps/${app}${sourceEnv}/cblbin/* $goldFilesPath/apps/${app}${targetEnv}/cblbin/
+if [[ "$app" == "cs" ]]; then
+  rsync -ai $goldFilesPath/apps/${app}${sourceEnv}/setup/* $goldFilesPath/apps/${app}${targetEnv}/setup/
+fi
+
+# Run the gold sync script
+$PS_SCRIPT_BASE/migration/syncAppFilesfromGold -a $app -e $targetEnv
+######
+
+util::log "DEBUG" "****Completed envFileRefresh for ${app}${targetEnv} from ${sourceEnv}"
+util::log "INFO" "Details of the envFileRefresh operation can be found in $maintLogFile"
+
+#END

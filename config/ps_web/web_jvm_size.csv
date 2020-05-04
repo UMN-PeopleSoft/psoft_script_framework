@@ -1,0 +1,8 @@
+#list of web JVM sized based on env and app
+csprd,3072
+ihprd,4096
+hrprd,4096
+fsprd,2048
+csper,2560
+ihper,4096
+hrper,3072

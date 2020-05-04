@@ -1,0 +1,131 @@
+#!/usr/local/bin/bash
+################################################################################
+##
+## File Name   : domain_status
+## Description : basic domain status monitoring
+## Author      : Nate Werner
+## Created     : 2/11/2019
+## Updated     :
+################################################################################
+## Syntax      : domain_status
+##
+################################################################################
+## Note        : To exclude domains being montiored, add domain name in
+##               /psoft/admin/config/inventory/domain.exclude
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%%scripts*}scripts/library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/monitor.sh
+
+# Define list of envs to monitor
+envList="${MON_ENV_LIST[@]}"
+appList="${MON_APP_LIST[@]}"
+
+# override variable
+#envList=("prd","qat","dev","fix","trn","cls")
+
+# variables
+domainList=()
+declare -A domainInfo
+domainName=""
+env=""
+app=""
+domainResult=""
+domainStatus=""
+
+# setup vault access
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+
+# Main steps
+# Loop through each env and each app
+for env in ${envList[@]}; do
+  for app in ${appList[@]}; do
+
+     echo "Domains being monitored=$app$env"
+
+     # SLA window check
+     if util::isInSLA "$app" "$env"; then
+       #echo "I am in SLA"
+       sleep 1
+     else
+       # echo "I am not in SLA, do not monitor"
+       continue
+     fi
+
+    # get list of domains for each app, tools version blank, only monitor most current tools version
+    inventory::getDomainsByEnv "$app" "$env" "" "" "" domainList
+    if [ $? -gt 0 ]; then
+       echo "Error during getDomainByEnv call."
+       continue
+    fi;
+
+    for domainName in ${domainList[@]}; do
+
+       # First Check if this domain is in the exluded list
+       if inventory::isInExcludeList "$domainName" ""; then
+          #echo "${domainName}: Skipping domain monitoring (Exclude List)"
+          continue
+       elif monitor::isDomainInBlackout "$domainName" ""; then
+          #echo "${domainName}: Skipping domain monitoring (Blackout List)"
+          continue
+       fi
+
+       # This is an active domain, should be running
+       # get detail of the domain
+       inventory::getDomainInfo "$domainName" "" "" domainInfo
+       if [ $? -gt 0 ]; then
+          echo "Error during getDomainInfo call"
+          continue
+       fi;
+
+       domainStatus="Up"
+       # Check each type of domain if process is running
+       case "${domainInfo[$DOM_ATTR_TYPE]}" in
+         "web")
+            domainResult=$( ssh -o StrictHostKeyChecking=no ${domainInfo[$DOM_ATTR_HOST]} "ps -ef | grep ${domainInfo[$DOM_ATTR_NAME]} | grep ${domainInfo[$DOM_ATTR_TOOLSVER]:0:4} | grep -i 'weblogic.Server' | grep -v CacheServer | grep -v grep | wc -l" 2>&1 )
+            ;;
+         "app")
+            domainResult=$( ssh -o StrictHostKeyChecking=no ${domainInfo[$DOM_ATTR_HOST]} "ps -ef | grep 'PSAPPSRV' | grep ${domainInfo[$DOM_ATTR_NAME]}/ | grep -v grep | wc -l" 2>&1 )
+            ;;
+         "prc")
+            domainResult=$( ssh -o StrictHostKeyChecking=no ${domainInfo[$DOM_ATTR_HOST]} "ps -ef | grep 'PSPRCSRV' | grep ${domainInfo[$DOM_ATTR_NAME]}/ | grep -v grep | wc -l" 2>&1)
+            ;;
+       esac
+       # no rows returned means it's down
+       if [[ $domainResult -lt 1 ]]; then
+          domainStatus="Down"
+       fi
+
+       #Debug
+       #echo "${domainInfo[$DOM_ATTR_NAME]} on ${domainInfo[$DOM_ATTR_HOST]} is $domainStatus"
+
+       if [[ "$domainStatus" == "Down" ]]; then
+         #echo "email down message"
+         body="${domainInfo[$DOM_ATTR_TYPE]} server ${domainInfo[$DOM_ATTR_NAME]} domain is down on ${domainInfo[$DOM_ATTR_HOST]}.";export body;
+         subject="${domainInfo[$DOM_ATTR_TYPE]} domain ${domainInfo[$DOM_ATTR_NAME]} is unavailable";export subject;
+
+         util::sendNotification "WARN" "$subject" "$body" "psadmin@company.com"
+         if [[ "${env}" == +(prd|rpt|trn|cls|fix) ]]; then
+           util::sendNotification "CRITICAL" "$subject" "$body" "psadmin@company.com"
+         fi
+       fi
+
+    done # domain loop
+
+  done # app loop
+
+done # env Loop
+
+# END Program

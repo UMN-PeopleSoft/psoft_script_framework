@@ -1,0 +1,244 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : createAppEnv
+## Description : Create a web/app/sched app/env using ansible to a new major Tools level
+## Author      : Nate Werner
+## Created     : 8/9/2018
+##
+################################################################################
+##
+## Syntax      : createAppEnv -a <App Code> -e <Env Code> -y <Dom Type> -t <new_tools_verison> -w <new_weblogic_Version> -v -s -b -h
+## Parameters  : -a <App Code>  : (required) 2 char app code: cs, fs, hr, ih
+##               -e <Env Code>  : (required) 3 char env code: dev,tst,qat,prd,per,fix,upg,trn,cls,dmo,dmn,umn,tec
+##               -y <Dom Type>  : (optional) app, web, prc, or all for all types, default = all
+##               -t <new_tools_verison> : (Required) Full tools version of PeopleTools to upgrade domain (ie: 8.55.13p1).
+##               -w <new_weblogic_Version> : (Required) New version for Weblogic (applies to type of web or all).
+##               -v             : Enable ansible debug/verbose mode
+##               -s             : Use Serial mode. Changes are applied one domain at a time (rolling upgrades).
+##                                Default = parallel (all domains at once)
+##               -b             : Boot domains after upgrading. Use -s and -b for rolling patch without interuption to users.
+##               -h             : Display this help.
+## Example     : createAppEnv.sh -a cs -e dev -t 8.56.10 -w 12.2.3.0.5
+##
+################################################################################
+
+### Help Instructions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  createAppEnv will upgrade all domains in an existing application/environment"
+   echo "     to a new set of domains on a new major Tools version, cloning the inventory"
+   echo "     from current major PeopleTools to new major PeopleTools from any location,"
+   echo "     then using an ansible playbook create the new domains based on inventory."
+   echo "     If a domain did not exist on current PeopleTools then use the createDomain"
+   echo "     command as it does not assume the domain existing on previous version."
+   echo "     If the app/env does not exist for older tools version, or the new PeopleTools"
+   echo "     version is the same as the major version of an existing env, the process"
+   echo "     wil exit with an error"
+   echo " Parameters"
+   echo "     -a <App Code>  : (Required) 2 char app code: cs, fs, hr, ih"
+   echo "     -e <Env Code>  : (Required) 3 char env code: dev,tst,qat,prd,per,fix,upg,trn,cls,dmo,dmn,umn,tec"
+   echo "     -y <Dom Type>  : (Optional) app, web, prc, appweb, or all for all types, default = all"
+   echo "     -t <new_tools_verison> : (Required) Full tools version of PeopleTools to upgrade domains to."
+   echo "     -w <new_weblogic_Version> : (Required) new version for weblogic (applies to type of web or all)."
+   echo "     -v             : Enable ansible debug/verbose mode."
+   echo "     -s             : Use Single/Serial mode. Used for testing to minimize domain impact if issues"
+   echo "                        Default = parallel by hosts"
+   echo "     -b             : Boot domains after patching.  Assumes the CA job for DB is completed"
+   echo "     -h             : Display this help"
+   echo
+   TOOLS_VERSION_LIST=`find /psoft/tools/8.* -maxdepth 0 -printf ','%f -type d`
+   echo "Valid Tools options are: $TOOLS_VERSION_LIST"
+   WEBLOGIC_VERSION_LIST=`find /psoft/weblogic/1* -maxdepth 0 -printf ','%f -type d`
+   echo "Valid Weblogic options are: $WEBLOGIC_VERSION_LIST"
+   echo
+   echo "Sample: createAppEnv.sh -a cs -e dev -t 8.56.10 -w 12.2.1.3.180717 -b"
+   echo
+   exit 1
+}
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+source $LIB_HOME/ansible.sh
+
+##### Variable and defaults
+# Set in bootstrap:
+#   ANSIBLE_HOME
+#   DOMAIN_LIST
+#   MAINT_HOME
+#   SCRIPT_HOME
+
+playbookFile="create_appenv.yml"
+debugFlag=""
+app=""
+env=""
+domainType=""
+newToolsVersion=""
+newWeblogicVersion=""
+bootDomain=""
+declare -a domainList
+bootVar=""
+serialFlag=""
+extraVars=""
+ranCommand="$@"
+
+##### Prompt processing and validation
+while getopts "hvbsa:e:y:t:w:" optname
+  do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "y")
+        domainType=$OPTARG
+        ;;
+      "s")
+        serialFlag="1"
+        ;;
+      "t")
+        newToolsVersion=$OPTARG
+        ;;
+      "w")
+        newWeblogicVersion=$OPTARG
+        ;;
+      "b")
+        bootDomain="True"
+        ;;
+      "v")
+        debugFlag="-vvv"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+  done
+
+### Main
+
+newShortToolsVersion="${newToolsVersion:0:4}"
+# Calculate run duration
+bash_start=$(date +%s)
+currentDate="$(date +%y%m%d_%H%M )"
+# standard logging
+patchLogFile="$PS_SCRIPT_BASE/logs/maint/createAppEnv_${app}${env}_$currentDate.log"
+util::setLogFile "$patchLogFile"
+util::log "DEBUG" "****Running $ranCommand"
+
+# verifiy required fields
+if [[ -z "$app" || -z "$env" ]]; then
+  util::log "ERROR" "App Code and Env Code is required."
+  usageInfo
+fi
+
+if [[ -z "$newToolsVersion" ]]; then
+  util::log "ERROR" "New PeopleTools version is required."
+  usageInfo
+fi
+
+if [ ! -e /psoft/tools/$newToolsVersion ]; then
+  util::log "ERROR" "Invalid Tools version specified"
+  usageInfo
+fi
+if [ "$domainType" == "all" ]; then
+   domainType=""
+fi
+
+if [[ ( "${domainType}" == *"web"* || "${domainType}" == "") && ! -e /psoft/tools/$newToolsVersion ]]; then
+  util::log "ERROR" "Invalid Weblogic version specified"
+  usageInfo
+fi
+
+#### Update and check domain list
+echo
+util::log "INFO" "Re-syncing domain list..."
+if [ -n "$domaintType" ]; then
+  $MAINT_HOME/syncDomainList -a $app -e $env -y $domainType
+else
+  $MAINT_HOME/syncDomainList -a $app -e $env
+fi
+util::log "INFO" "Sync Completed"
+echo
+
+util::log "INFO" "Attempting to clone $app$env domains..."
+# Now set the domain.list with the new versions to drive the patch in ansible
+inventory::cloneEnv "$app" "$env" "$newToolsVersion" "$newWeblogicVersion"
+cloneResults=$?
+if [ $cloneResults -ne 0 ]; then
+  util::log "ERROR" "Failed to setup new env on $newWeblogicVersion"
+  exit 1
+fi
+util::log "INFO" "Successfully cloned $app$env inventory for $newToolsVersion"
+
+inventory::getDomainsByEnv "$app" "$env" "$domainType" "$newShortToolsVersion" domainList
+util::log "DEBUG" "Domain list to be created: ${domainList[@]}"
+
+###### Ansible processing
+# setup vault access (allows vault password to be sent from Rundeck)
+util::log "INFO" "Setting up vault access..."
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+# Setup log file for playbook, using same as this script
+export ANSIBLE_LOG_PATH=$patchLogFile
+
+# First, dynamically configure the playbook based on the domain being created
+ansible::dynConfigPlaybook "${domainType}" "${app}${env}" "$playbookFile"
+
+if [ -n "$bootDomain" ]; then
+  bootVar="boot_domain=$bootDomain"
+else
+  bootVar=""
+fi
+# Check parallel or serial
+if [ "$serialFlag" == "1" ]; then
+   echo "  serial: 1" >> $ANSIBLE_HOME/$playbookFile
+fi
+
+# Run the ansible playbook
+extraVars="filter_app=$app filter_env=$env filter_tools_ver=$newShortToolsVersion $bootVar"
+# Run playbook
+ansible::runPlaybook "$extraVars" "$debugFlag" "$playbookFile"
+
+### Addtional summary output
+bash_end=$(date +%s)
+runtime=$(python -c "print '%u:%02u' % ((${bash_end} - ${bash_start})/60, (${bash_end} - ${bash_start})%60)")
+domainsUpgraded=$(echo "${domainList[@]}" | sed 's/\n/\n   /g')
+util::log "INFO"  "Domains upgraded: "
+util::log "INFO"  "   $domainsUpgraded"
+util::log "INFO"  "Run Time: $runtime"
+util::log "INFO"  "Failed Tasks:"
+failList=$( grep -B 1 "fatal" $patchLogFile )
+if [ -z "$failList" ]; then
+   util::log "INFO" "   No Failed Tasks"
+   echo
+   util::log "INFO" "New domains are created under the folder $DOMAIN_BASE/$newShortToolsVersion"
+else
+   util::log "ERROR" "   $failList"
+   exit 1
+fi
+
+# Completed domain deployment

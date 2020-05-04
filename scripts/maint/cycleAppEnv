@@ -1,0 +1,299 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : cycleAppEnv
+## Description : Cycle PeopleSoft domains in an app/env. Will include additional
+##               steps like, web pool member in F5, add/remove blackout in OEM,
+##               verify proper stop/start of processes.  Only need to provide -t if
+##               stopping a domain of same name on older tools version.  Use -m
+##               to clear cache for app domains.  By default, scheduler domains
+##               are not cycled, use -x to also cycle schedulers.  By default,
+##               Coherence cache servers are not stopped, use -c to also stop/start
+##               the cache servers with the domain.  By default, domains will all
+##               be cycled in parallel, use -s <number>, to limit parallel to
+##               "number".  A rolling cycle could be, "-s 1" or "-s 2", for example.
+## Author      : Nate Werner
+## Created     : 11/16/2017
+## Updated     : 2/17/19 move oem to local file blackout list
+################################################################################
+## Syntax      : cycleAppEnv -a <appCode> -e <envCode> -t <major tools version>]
+##                  [-y <type>] [-m] [-x] [-c] [-p <count>] [-s] [-v] [-h]
+## Parameters  : -a <app code>  : Filter by application
+##             : -e <env code>  : Filter by environment
+##             : -t <major tools version> : If not provided assumes most current
+##                   else searches for specified version of domain (ie:8.54)
+##             : -y <type>: Filter selection by type (web,app,prc), default: all
+##             : -m  : If an app server domains clear all cache before cycleing.
+##             : -x  : Also cycle schedulers with other domains.  Ignored if
+##                     -y is set.
+##             : -c  : Also cycle Coherence cache servers on domains they run on.
+##             : -p <number> : Limit cycle to "number" of domains at once.
+##             : -s  : Use serial boot method within each app server (Default: parallel).
+##             : -f  : Force Boot
+##             : -z  : force app server domain to stop, default is graceful stop.
+##             : -g  : Skip the trace domains in the cycle
+##
+## Example     : cycleAppEnv -a cs -e qat -p 1
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source  $LIB_HOME/inventory.sh
+source $LIB_HOME/monitor.sh
+source  $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+
+# Script variables
+app=""
+env=""
+majorToolsVer=""
+domainType="all"
+# turn off all optional features by default
+clearCache=0
+serialBoot=0
+skipF5=0
+cycleSchedulers=0
+cycleCoherence=0
+parallelMax=0
+forceStop=0
+forceBoot=0
+skipTrace=0
+purpose=""
+blackoutDur=$MAINT_DEF_BLACKOUT_DUR
+debugFlag="n"
+declare -A domAttribs
+exitCode=0
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  cycleDomain -a <app_code> -e <env_code> [-t <major tools version>] [-m] [-x] [-c] [-p <num>] [-s] [-v] [-h]"
+   echo "     cycle all domains in a specific app/env.  Defalt behavior will cycle"
+   echo "     the most current tools version of the domain, disable/enabling web "
+   echo "     domains in F5, app server cache is not cleared, but web/prcs domains"
+   echo "     are always cleared.  By default schedulers are not cycled, use -x to"
+   echo "     include schedulers in cycle.  Use -c to also include Coherence cache"
+   echo "     servers in cycle.  By default, all domains are cycled in parallel."
+   echo "     Use -p <num> to limit concurrent domains cycled to 'num'"
+   echo " Parameters"
+   echo "     -a <app_code>    : (Required) Filter for an application (cs,fs,hr,ih)"
+   echo "     -e <env_code>    : (Required) Filter for environment"
+   echo "                          (dmo,dmn,umn,dev,tst,qat,fix,per,trn,cls,prd,upg,qrpt,rpt)"
+   echo "     -t <maj_tools_ver>: (Optional) Tools version of the domain if not the most current"
+   echo "     -y <type>        : (Optional) Domain type to filter on (web,app,prc)"
+   echo "     -m               : (Optional) Clear cache for app server domain"
+   echo "     -x               : (Optional) Add scheduler domains in cycle, default are skipped"
+   echo "     -c               : (Optional) Add Coherence cache server in cycle."
+   echo "     -p <num>         : (Optional) Limit app/env cycle to 'num' of domains done at once"
+   echo "     -s               : (Optional) Use serial boot method within each app server (Default: parallel)."
+   echo "     -z               : (Optional) Force shutdown of app server domains (default gracefull)"
+   echo "     -f               : (Optional) Force boot, start any sub-processes not running"
+   echo "     -g               : (Optional) Skip the trace domains in the cycle"
+   echo "     -u <purpose>     : (Optional) main, ib, ren, trace"
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: cycleAppEnv -a cs -e dev -x -p 2"
+   echo "                Cycles all the cs dev domains, including schedulers, but skips"
+   echo "                 Coherence cache servers, and will cycle 2 domains at a time"
+   echo "                 for a more rolling cycle."
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's paramters
+while getopts ":vhgmfzsxcp:y:t:e:a:u:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "t")
+        majorToolsVer=$OPTARG
+        ;;
+      "y")
+        domainType=$OPTARG
+        ;;
+      "o")
+        skipF5=1
+        ;;
+      "m")
+        clearCache=1
+        ;;
+      "x")
+        cycleSchedulers=1
+        ;;
+      "c")
+        cycleCoherence=1
+        ;;
+      "p")
+        parallelMax=$OPTARG
+        ;;
+      "s")
+        serialBoot=1
+        ;;
+      "f")
+        forceBoot=1
+        ;;
+      "z")
+        forceStop=1
+        ;;
+      "g")
+        skipTrace=1
+        ;;
+      "u")
+        purpose=$OPTARG
+        ;;
+      "v")
+        debugFlag="y"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+## Main
+
+# verifiy required fields
+if [[ -z "$app" || -z "$env" ]]; then
+  echo "App and Env code is required."
+  usageInfo
+fi
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/cycleAppEnv_${app}${env}_$currentDate.log"
+util::setLogFile "$maintLogFile"
+util::log "DEBUG" "****Starting cycleAppEnv for ${app}${env}"
+
+# set defaults
+if [[ -z "$domainType" ]]; then
+  domainType="all"
+fi
+# if tools version was not provided, get most current
+if [[ -z "$majorToolsVer" ]]; then
+  majorToolsVer=$( inventory::getCurrentToolsAppEnv "$app" "$env" "$domainType")
+fi
+util::log "DEBUG" "stopAppEnv: Selected tools version: $majorToolsVer"
+
+# get array of domains in app/env
+util::log "DEBUG" "Loading domain list with: $app $env $domainType $purpose $majorToolsVer"
+inventory::getDomainsByEnv "$app" "$env" "$domainType" "$purpose" "$majorToolsVer" domainList
+if [[ $? -ne 0 ]]; then
+  util::log "Error" "Invalid app/env selected (domain::getDomainsByEnv)"
+  exit 1
+else
+  if [ $parallelMax -eq 0 ]; then
+    util::log "WARNING" "****Initiating fully parallel cycle for $domainType $app $env $purpose, environment will be briefly unavailable"
+  else
+    util::log "INFO" "****Initiating rolling cycle for $domainType $app $env $purpose procesing $parallelMax domain(s) at a time"
+  fi
+  echo
+  # allow abort if unexpected behavior
+  sleep 2
+
+  # setup vault access
+  export ANSIBLE_LOG_PATH=/dev/null
+  sec::getandStoreVaultAccess
+  if [[ $? -ne 0 ]]; then
+    util::log "ERROR" "Unable to setup vault access"
+    exit 1
+  fi
+
+  if [[ $skipTrace -eq 1 ]]; then
+    # remove trace domains from list
+    for index in ${!domainList[@]}; do
+      if [[ "${domainList[$index]}" =~ t[0-9] && ! "${domainList[$index]}" =~ tst[0-9] && ! "${domainList[$index]}" =~ rpt[0-9] && ! "${domainList[$index]}" =~ qat[0-9] ]]; then
+        unset 'domainList[index]'
+      fi
+    done
+  fi
+
+  # Start blackout for app/env
+  util::log "DEBUG" "Calling monitor::startBlackoutAppEnv $app $env"
+  monitor::startBlackoutAppEnv "$app" "$env" "$blackoutDur" "$blackoutDescr"
+
+  # Create list of __cycleDomain parameters from domain list
+  for domain in ${domainList[@]}; do
+     # default: exclude schedulers
+     if [[ $cycleSchedulers == 0 && "$domain" == *PSUNX* ]]; then
+       util::log "INFO" "Skipping scheduler domain $domain"
+     else
+       # parameter string must have a space at the end
+       domainParameters="${domainParameters}${domain} ${majorToolsVer} ${skipF5} ${clearCache} ${serialBoot} ${cycleCoherence} ${forceStop} ${forceBoot} ${debugFlag} ${maintLogFile} "
+     fi
+  done
+
+  util::log "DEBUG" "cycleAppEnv: Domain Parms: ${domainParameters}"
+
+  # make parallel parse the parameters with field speparator of space
+  IFS=' '
+  ## Now fire off commands in parallel, each command having 9 parameters
+  if [ $parallelMax -eq 0 ]; then
+    util::log "DEBUG" "Calling parallel -j 0 -N10 --joblog jlog_${app}${env} --line-buffer maint::cycleDomain {1..10} ${domainParameters}"
+    parallel -j 0 -N 10 --joblog jlog_${app}${env} --line-buffer maint::cycleDomain {1} {2} {3} {4} {5} {6} {7} {8} {9} {10} ::: $domainParameters
+  else
+    util::log "DEBUG" "Calling parallel -j $parallelMax -N10 --joblog jlog_${app}${env} --line-buffer maint::cycleDomain {1..10}"
+    parallel -j $parallelMax -n 10 --joblog jlog_${app}${env} --line-buffer maint::cycleDomain {1} {2} {3} {4} {5} {6} {7} {8} {9} {10} ::: $domainParameters
+  fi
+  parallelExit=$?
+  if [[ $parallelExit -ne 0 && $parallelExit < 1000 ]]; then
+    util::log "ERROR" "Parallel command failed with exit code: $parallelExit , out of space/memory?"
+  fi
+  util::log "DEBUG" "Parallel command log output: "
+  cat jlog_${app}${env} >> $maintLogFile
+  IFS=$'\n'
+  # Check job log (jlog) for any errors
+  errorList=( $( grep -v '0'$'\t''0' jlog_${app}${env} | grep -v JobRuntime ) )
+  if [[ -n "$errorList" ]]; then
+    for process in ${errorList[@]}; do
+       failedCommand=$( echo $process | awk -F' ' '{ print $9" "$10" "$11 }' )
+       echo "*******"
+       util::log "ERROR" "The parallel command for \"$failedCommand\" did not run to success, check logs"
+       echo "*******"
+       exitCode=1
+    done
+  fi
+
+  #remove log file
+  rm -f jlog_${app}${env}
+
+  totalDomains=${#domainList[@]}
+  faildDomains=${#errorList[@]}
+  failedRate=$( echo "scale=2; $faildDomains / $totalDomains" | bc -l )
+  if (( $(bc <<< "$failedRate < 0.25") )); then
+    # End standard blackout for app/env
+    util::log "DEBUG" "Calling monitor::endBlackoutAppEnv $app $env"
+    monitor::endBlackoutAppEnv "$app" "$env"
+  else
+    util::log "WARNING" "Too many domains failed startup, not ending blackout at startup.  Note: The original blackout may end soon, manually add new blackout if needed."
+  fi
+
+  echo
+  util::log "DEBUG" "****Completed cycle for $domainType $app $env"
+  util::log "INFO" "Details of the cycle operation can be found in $maintLogFile"
+  exit ${exitCode}
+fi
+#END

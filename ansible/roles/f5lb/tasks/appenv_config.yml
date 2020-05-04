@@ -1,0 +1,418 @@
+---
+# tasks file for f5 Load balancer for app/env specific configurations, which represent one virtual server.
+
+# This section sets up all the remainging objects for a virtual server
+
+- name: "Setup web port for main/pia"
+  set_fact:
+    webdomain_http_port: "{{ lookup('csvfile', filter_app + ' file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}{{ lookup('csvfile', webdomain_env_code + ' file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}{{ lookup('csvfile', webdomain_alt_string + 'main file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}1"
+    match_service_flag: "no"
+
+# Normaly the sesssion only applies to one pool, but for IH, the session sticky will
+#  keep the same web host for the Shib/Apache and PIA requests, since they will ultimately be the same weblogic instance.
+- name: "Set IH Match service flag for Shib"
+  set_fact:
+    match_service_flag: "yes"
+  when: filter_app == "ih"
+
+## Setup PeopleSoft's standard persistance profile unique for app-env virt server, and only for the default pool
+- name: Create a persistence cookie profile
+  bigip_profile_persistence_cookie:
+    name: psoft_session_cookie_{{ filter_app }}{{ filter_env }}
+    parent: "{{ um_f5_parent_persistence }}"
+    cookie_method: "hash"
+    cookie_name: "{{ filter_app|upper }}{{ filter_env|upper }}-{{ webdomain_http_port }}-PORTAL-PSJSESSIONID"
+    match_across_services: "{{ match_service_flag }}"
+    always_send: yes
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  tags: appenv
+
+# setup Main PIA Pool and members
+- name: Setup default pool for main pia content
+  bigip_pool:
+    state: present
+    name: "{{ filter_app }}{{ filter_env }}"
+    description: "PS Web {{ filter_app }}{{ filter_env }} PIA"
+    monitor_type: single
+    monitors: "psoft_pia_monitor"
+    partition: "{{ um_f5_partition }}"
+  delegate_to: localhost
+  tags: appenv
+
+- name: "Get list of all web Domains names from web instance inventory for main/pia"
+  shell:  cat {{ config_home }}/inventory/domain.list | grep "web {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} main" | awk '{ print $1 }'
+  register: web_domain_name_list
+  changed_when: False
+
+- name: "Get list of web Domains hosts from web instance inventory for main/pia"
+  shell:  cat {{ config_home }}/inventory/domain.list | grep "{{ item }} web {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} main" | awk '{ print $8 }'
+  register: web_domain_host_list
+  changed_when: False
+  loop: "{{ web_domain_name_list.stdout_lines }}"
+
+- name: "Map Web Hosts to IPs"
+  shell: dig {{ item.stdout }}.company.com | grep "192.168." | awk '{ print $5 }'
+  register: web_ip_list
+  changed_when: False
+  loop: "{{ web_domain_host_list.results }}"
+
+- name: "Add Nodes for {{ filter_app }}{{ filter_env }}"
+  bigip_node:
+    address: "{{ item.1.stdout }}"
+    name: "{{ item.0.stdout }}.company.com"
+    description: "PS Web {{ filter_env }}"
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  loop: "{{ web_domain_host_list.results | zip(web_ip_list.results) | list }}"
+  tags: appenv
+
+- name: "Add pool members for main/PIA pool {{ filter_app }}{{ filter_env }}"
+  bigip_pool_member:
+    pool: "{{ filter_app }}{{ filter_env }}"
+    partition: "{{ um_f5_partition }}"
+    address: "{{ item.0.1.stdout }}"
+    name: "{{ item.0.0.stdout }}.company.com"
+    port: "{{ webdomain_http_port }}"
+    description: "{{ item.1 }}"
+  delegate_to: localhost
+  loop: "{{ web_domain_host_list.results | zip(web_ip_list.results) | zip(web_domain_name_list.stdout_lines) | list }}"
+  tags: domain
+
+####
+# setup IB Pool and members
+- name: "Block for setup of IB Pool and members"
+  block:
+
+  - name: Setup pool for main IB content
+    bigip_pool:
+      state: present
+      name: "{{ filter_app }}{{ filter_env }}ib"
+      description: "PS Web {{ filter_app }}{{ filter_env }} IB"
+      monitor_type: single
+      monitors: "psoft_psigw_monitor"
+      partition: "{{ um_f5_partition }}"
+    delegate_to: localhost
+    tags: appenv
+
+  - name: "Setup web port for IB"
+    set_fact:
+      webdomain_http_port: "{{ lookup('csvfile', filter_app + ' file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}{{ lookup('csvfile', filter_env + ' file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}{{ lookup('csvfile', webdomain_alt_string + 'ib file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}1"
+    tags: domain
+
+  - name: "Get list of all web Domains names from web instance inventory for IB"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "web {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} ib" | awk '{ print $1 }'
+    register: web_domain_name_list
+    changed_when: False
+    tags: domain
+
+  - name: "Get list of web Domains hosts from web instance inventory for IB"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "{{ item }} web {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} ib" | awk '{ print $8 }'
+    register: web_domain_host_list
+    changed_when: False
+    loop: "{{ web_domain_name_list.stdout_lines }}"
+    tags: domain
+
+  - name: "Map Web Hosts to IPs for IB domains"
+    shell: dig {{ item.stdout }}.company.com | grep "192.168" | awk '{ print $5 }'
+    register: web_ip_list
+    changed_when: False
+    loop: "{{ web_domain_host_list.results }}"
+    tags: domain
+
+  # Most cases ib web domains are on same host as PIA, but is flexible to handle separate hosts
+  - name: "Add nodes, if needed for {{ filter_app }}{{ filter_env }}ib"
+    bigip_node:
+      address: "{{ item.1.stdout }}"
+      name: "{{ item.0.stdout }}.company.com"
+      description: "PS Web {{ filter_env }}"
+      partition: "{{ um_f5_partition }}"
+      state: present
+    delegate_to: localhost
+    loop: "{{ web_domain_host_list.results | zip(web_ip_list.results) | list }}"
+    tags: domain
+
+  - name: "Add pool members for {{ filter_app }}{{ filter_env }}ib pool"
+    bigip_pool_member:
+      pool: "{{ filter_app }}{{ filter_env }}ib"
+      partition: "{{ um_f5_partition }}"
+      address: "{{ item.0.1.stdout }}"
+      name: "{{ item.0.0.stdout }}.company.com"
+      port: "{{ webdomain_http_port }}"
+      description: "{{ item.1 }}"
+    delegate_to: localhost
+    loop: "{{ web_domain_host_list.results | zip(web_ip_list.results) | zip(web_domain_name_list.stdout_lines) | list }}"
+    tags: domain
+
+  when: filter_env in ["dev", "tst", "qat", "prd", "per", "upg"]
+
+########
+
+# setup First REN Pool and member
+- name: "Block for setup of REN Pool and member"
+  block:
+
+  - name: Setup pool for main REN content
+    bigip_pool:
+      state: present
+      name: "{{ filter_app }}{{ filter_env }}ren"
+      description: "PS Web {{ filter_app }}{{ filter_env }} REN"
+      monitor_type: single
+      monitors: "psoft_ren_monitor"
+      partition: "{{ um_f5_partition }}"
+    delegate_to: localhost
+    tags: appenv
+
+  - name: "Setup web port for REN"
+    set_fact:
+      appdomain_http_port: "7180"
+    tags: domain
+
+  - name: "Get list of all app Domains names from inventory for REN"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "app {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} ren" | grep -v ren2 | awk '{ print $1 }'
+    register: app_domain_name_list
+    changed_when: False
+    tags: domain
+
+  - name: "Get list of app Domains hosts from inventory for REN"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "{{ item }} app {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} ren" | grep -v ren2 | awk '{ print $8 }'
+    register: app_domain_host_list
+    changed_when: False
+    loop: "{{ app_domain_name_list.stdout_lines }}"
+    tags: domain
+
+  - name: "Map App Hosts to IPs for REN domains"
+    shell: dig {{ item.stdout }}.company.com | grep "192.168" | awk '{ print $5 }'
+    register: app_ip_list
+    changed_when: False
+    loop: "{{ app_domain_host_list.results }}"
+    tags: domain
+
+  - name: "Add nodes for {{ filter_app }}{{ filter_env }}ren"
+    bigip_node:
+      address: "{{ item.1.stdout }}"
+      name: "{{ item.0.stdout }}.company.com"
+      description: "PS Web {{ filter_env }} REN"
+      partition: "{{ um_f5_partition }}"
+      state: present
+    delegate_to: localhost
+    loop: "{{ app_domain_host_list.results | zip(app_ip_list.results) | list }}"
+    tags: domain
+
+  - name: "Add pool members for {{ filter_app }}{{ filter_env }}ren pool"
+    bigip_pool_member:
+      pool: "{{ filter_app }}{{ filter_env }}ren"
+      partition: "{{ um_f5_partition }}"
+      address: "{{ item.0.1.stdout }}"
+      name: "{{ item.0.0.stdout }}.company.com"
+      port: "{{ appdomain_http_port }}"
+      description: "{{ item.1 }}"
+    delegate_to: localhost
+    loop: "{{ app_domain_host_list.results | zip(app_ip_list.results) | zip(app_domain_name_list.stdout_lines) | list }}"
+    tags: domain
+
+  when: (filter_app == "ih" or (filter_app == "fs" and filter_env in ["prd","cls"])) and filter_env not in ["dmo","dmn"]
+
+# setup Second REN Pool and member
+- name: "Block for setup of REN Pool and member 2nd"
+  block:
+
+  - name: Setup pool for main REN content 2nd
+    bigip_pool:
+      state: present
+      name: "{{ filter_app }}{{ filter_env }}ren"
+      description: "PS Web {{ filter_app }}{{ filter_env }} REN"
+      monitor_type: single
+      monitors: "psoft_ren_monitor"
+      partition: "{{ um_f5_partition }}"
+    delegate_to: localhost
+    tags: appenv
+
+  - name: "Setup web port for REN 2nd"
+    set_fact:
+      appdomain_http_port: "7180"
+    tags: domain
+
+  - name: "Get list of all app Domains names from inventory for REN 2nd"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "app {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} ren" | grep ren2 | awk '{ print $1 }'
+    register: app_domain_name_list
+    changed_when: False
+    tags: domain
+
+  - name: "Get list of app Domains hosts from inventory for REN 2nd"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "{{ item }} app {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} ren" | grep ren2 | awk '{ print $8 }'
+    register: app_domain_host_list
+    changed_when: False
+    loop: "{{ app_domain_name_list.stdout_lines }}"
+    tags: domain
+
+  - name: "Map App Hosts to IPs for REN domains 2nd"
+    shell: dig {{ item.stdout }}.company.com | grep "192.168" | awk '{ print $5 }'
+    register: app_ip_list
+    changed_when: False
+    loop: "{{ app_domain_host_list.results }}"
+    tags: domain
+
+  - name: "Add nodes for {{ filter_app }}{{ filter_env }}ren 2nd"
+    bigip_node:
+      address: "{{ item.1.stdout }}"
+      name: "{{ item.0.stdout }}.company.com"
+      description: "PS Web {{ filter_env }} REN"
+      partition: "{{ um_f5_partition }}"
+      state: present
+    delegate_to: localhost
+    loop: "{{ app_domain_host_list.results | zip(app_ip_list.results) | list }}"
+    tags: domain
+
+  - name: "Add pool members for {{ filter_app }}{{ filter_env }}ren pool 2nd"
+    bigip_pool_member:
+      pool: "{{ filter_app }}{{ filter_env }}ren2"
+      partition: "{{ um_f5_partition }}"
+      address: "{{ item.0.1.stdout }}"
+      name: "{{ item.0.0.stdout }}.company.com"
+      port: "{{ appdomain_http_port }}"
+      description: "{{ item.1 }}"
+    delegate_to: localhost
+    loop: "{{ app_domain_host_list.results | zip(app_ip_list.results) | zip(app_domain_name_list.stdout_lines) | list }}"
+    tags: domain
+
+  when: (filter_app == "ih" or filter_app == "fs") and filter_env in ["prd"]
+
+##########
+# setup Shibboleth/Appache Proxy Pool and members
+- name: "Block for setup of Shib/Apache-Proxy Pool and members"
+  block:
+
+  - name: Setup pool for Shib/Apache-Proxy
+    bigip_pool:
+      state: present
+      name: "{{ filter_app }}{{ filter_env }}shib"
+      description: "PS Web {{ filter_app }}{{ filter_env }} Shib-Proxy"
+      monitor_type: single
+      monitors: "/ENTS/psoft_shib"
+      partition: "{{ um_f5_partition }}"
+    delegate_to: localhost
+    tags: appenv
+
+  - name: "Setup web port for Shib/Apache-Proxy"
+    set_fact:
+      webdomain_http_port: "{{ lookup('csvfile', filter_app + ' file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}{{ lookup('csvfile', filter_env + ' file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}{{ lookup('csvfile', webdomain_alt_string + 'main file=' + config_home + '/ps_web/web_port_map.csv delimiter=,') }}0"
+    tags: domain
+
+  - name: "Get list of all web Domains names from web instance inventory for Shib/Apache-Proxy"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "web {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} main" | awk '{ print $1 }'
+    register: web_domain_name_list
+    changed_when: False
+    tags: domain
+
+  - name: "Get list of web Domains hosts from web instance inventory for Shib/Apache-Proxy"
+    shell:  cat {{ config_home }}/inventory/domain.list | grep "{{ item }} web {{ filter_app }} {{ webdomain_env_code }} {{ report_flag }} main" | awk '{ print $8 }'
+    register: web_domain_host_list
+    changed_when: False
+    loop: "{{ web_domain_name_list.stdout_lines }}"
+    tags: domain
+
+  - name: "Map Web Hosts to IPs for Shib/Apache-Proxy domains"
+    shell: dig {{ item.stdout }}.company.com | grep "192.168" | awk '{ print $5 }'
+    register: web_ip_list
+    changed_when: False
+    loop: "{{ web_domain_host_list.results }}"
+    tags: domain
+
+  # Same nodes as PIA, always
+
+  - name: "Add pool members for {{ filter_app }}{{ filter_env }}shib pool"
+    bigip_pool_member:
+      pool: "{{ filter_app }}{{ filter_env }}shib"
+      partition: "{{ um_f5_partition }}"
+      address: "{{ item.0.1.stdout }}"
+      name: "{{ item.0.0.stdout }}.company.com"
+      port: "{{ webdomain_http_port }}"
+      description: "{{ item.1 }}"
+    delegate_to: localhost
+    loop: "{{ web_domain_host_list.results | zip(web_ip_list.results) | zip(web_domain_name_list.stdout_lines) | list }}"
+    tags: domain
+
+  when: filter_app == "ih" and filter_env not in ["umn","dmo","dmn","trn","cls"]
+
+########
+## Setup environment specific routing iRules by template.
+## 3 Types: Shib Split IB, shib Combined IB, Demo
+## This iRule will reference pools created above, must be created after pools.
+
+# read the security and admin sub-irules
+- name: "Read security sub-iRule"
+  set_fact:
+    psoft_security_sub_irule: "{{ lookup('file', config_home + '/f5/psoft_security.iRule') }}"
+
+- name: "Read admin non-prod sub-iRule"
+  set_fact:
+    psoft_admin_sub_irule: "{{ lookup('file', config_home + '/f5/psoft_psadmin_routes.iRule') }}"
+  when: filter_env not in ["prd"]
+
+- name: "Read admin prod sub-iRule"
+  set_fact:
+    psoft_admin_sub_irule: "{{ lookup('file', config_home + '/f5/psoft_psadmin_prod_routes.iRule') }}"
+  when: filter_env in ["prd"]
+
+- name: "Setup App Env specifc iRule template for shib/SDLCs envs"
+  bigip_irule:
+    content: "{{ lookup('template', config_home + '/f5/template/psoft_' + filter_app + '_routings.iRule.j2') }}"
+    module: ltm
+    name: "psoft_{{ filter_app }}{{ filter_env }}_routings"
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  when: filter_env in ["upg", "dev", "tst", "qat", "prd", "per","fix","qrpt","rpt","tec","trn","cls"]
+  tags: appenv
+
+- name: "Setup App Env specifc iRule template for Demo Envs"
+  bigip_irule:
+    content: "{{ lookup('template', config_home + '/f5/template/psoft_' + filter_app + '_routings_demo.iRule.j2') }}"
+    module: ltm
+    name: "psoft_{{ filter_app }}{{ filter_env }}_routings"
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  when: filter_env in ["umn","dmo","dmn"]
+  tags: appenv
+
+- name: Build iRule list for virtual server
+  set_fact:
+     iRule_list: "{{ um_pre_std_iRules + [ '/ENTS/psoft_' + filter_app + filter_env + '_routings' ] + um_post_std_iRules }}"
+  tags: appenv
+
+- name: Lookup IP for Virtual Server
+  set_fact:
+      vip: "{{ lookup('csvfile', filter_app + filter_env + ' file=' + config_home + '/f5/vip_map.csv delimiter=,') }}"
+  tags: appenv
+
+## Finally create the Virtual Server
+# webdomain_env_code representing the domain URL, ignoring reporting envs as they share URL domains
+- name: Add virtual server
+  bigip_virtual_server:
+    name: "{{ virt_host_url }}"
+    destination: "{{ vip }}"
+    port: 443
+    description: "{{ filter_app }}{{ filter_env }} Peoplesoft Site"
+    pool: "{{ filter_app }}{{ filter_env }}"
+    snat: "automap"
+    default_persistence_profile: "/ENTS/psoft_session_cookie_{{ filter_app }}{{ filter_env }}"
+    irules: "{{ iRule_list }}"
+    profiles:
+      - name: "{{ um_f5_protocol_profile }}"
+      - name: "{{ um_f5_http_profile }}"
+      - name: "/ENTS/psoft-{{ webdomain_env_code }}-ssl-client"
+        context: client-side
+      - name: "{{ um_f5_websocket_profile }}"
+      - name: "{{ um_f5_compression }}"
+      - name: "{{ um_f5_cache }}"
+    insert_metadata: no
+    partition: "{{ um_f5_partition }}"
+    state: present
+  delegate_to: localhost
+  tags: appenv
+
+#END

@@ -1,0 +1,45 @@
+#!/bin/env bash
+# login screen for psoft user
+#   displaying server status and domains
+
+# load needed libraries
+source $LIB_HOME/host.sh
+
+########## MAIN  ###########
+normal=`tput sgr0`
+   ARR_APP_DOM_STATUS=()
+   ARR_PRCS_DOM_STATUS=()
+   ARR_WEB_DOM_STATUS=()
+   ARR_COH_CACHE_STATUS=()
+
+host::getServerStats
+host::displayLoginInfo
+
+SEL_OPTION=-1
+
+# check that user selects an appropriate value
+while true; do
+
+  echo -n "Select server to load env script or [Enter] to return to shell: "
+  read SEL_OPTION
+  echo
+  if [[ "$SEL_OPTION" == "" ]]; then
+    break
+  fi
+  if [[ "$SEL_OPTION" =~ ^[0-9]+$ ]]; then
+    if [ "$SEL_OPTION" -ge 0 -a "$SEL_OPTION" -le "$DOM_COUNT" ]; then
+      break
+    fi
+  fi
+done
+
+echo ""
+if [[ "$SEL_OPTION" == 0 || "$SEL_OPTION" == "" ]]; then
+   #echo "Skip"
+   echo ""
+else
+  #echo $SEL_OPTION
+  #TEMPLATE_HOME="$PS_BASE/admin/scripts/template"
+  host::runDomainEnv
+
+fi

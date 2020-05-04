@@ -1,0 +1,11 @@
+---
+# tasks file for f5lb
+
+- name: Setup Config Values for F5 changes
+  import_tasks: setup_f5_configs.yml
+
+- name: Common F5 Configs (iFile, Compress, Cache)
+  import_tasks: common_config.yml
+
+- name: App-Env Specific Configs (Virt Server,Pools, profiles, iRules)
+  import_tasks: appenv_config.yml

@@ -1,0 +1,5 @@
+when LB_FAILED {
+    if { [active_members [LB::server pool]] == 0 } {
+        HTTP::respond 503 content [ifile get psoft_503_html]
+    }
+}

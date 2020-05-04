@@ -1,0 +1,4 @@
+Domain Type App Env Rpt Purpose SrvrName Host Tools_Ver Weblogic_Ver
+acsprd1 app cs prd N main NA psappprd1 8.57.12 NA
+acsprdib1 app cs prd N ib NA psappprd1 8.57.12 NA
+acsprd2 app cs prd N main NA psappprd2 8.57.12 NA

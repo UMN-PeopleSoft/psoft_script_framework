@@ -1,0 +1,180 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : updateF5forAppEnv
+## Description : update F5 Virtual server for an app/env using ansible
+## Author      : Nate Werner
+## Created     : 1/20/2020
+##
+################################################################################
+##
+## Syntax      : updateF5forAppEnv -a <App Code> -e <Env Code> -v -h
+## Parameters  : -a <App Code>  : (required) 2 char app code: cs, fs, hr, ih
+##               -e <Env Code>  : (required) 3 char env code: dev,tst,qat,prd,per,fix,upg,trn,cls,dmo,dmn,umn,tec
+##               -u             : (required) User Id to access F5
+##               -v             : Enable ansible debug/verbose mode
+##               -h             : Display this help.
+## Example     : updateF5forAppEnv.sh -a cs -e dev
+##
+################################################################################
+
+### Help Instructions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  updateF5forAppEnv: Updates/Created F5 vurtual server and supporting configs for"
+   echo "     a specific app and env. Use your own Internet ID for F5 Access"
+   echo " Parameters"
+   echo "     -a <App Code>  : (Required) 2 char app code: cs, fs, hr, ih"
+   echo "     -e <Env Code>  : (Required) 3 char env code: dev,tst,qat,prd,per,fix,upg,trn,cls,dmo,dmn,umn,tec"
+   echo "     -v             : Enable ansible debug/verbose mode."
+   echo "     -u             : User Name for F5 Access"
+   echo "     -h             : Display this help"
+   echo
+   echo "Sample: updateF5forAppEnv.sh -a cs -e dev"
+   echo
+   exit 1
+}
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+source $LIB_HOME/ansible.sh
+source $LIB_HOME/f5.sh
+
+##### Variable and defaults
+# Set in bootstrap:
+#   ANSIBLE_HOME
+#   DOMAIN_LIST
+#   MAINT_HOME
+#   SCRIPT_HOME
+
+playbookFile="update_f5_appenv.yml"
+debugFlag=""
+app=""
+env=""
+domainType=""
+bootDomain=""
+declare -a domainList
+bootVar=""
+serialFlag=""
+extraVars=""
+fullToolsVer=""
+majorToolsVer=""
+
+##### Prompt processing and validation
+while getopts "hva:e:u:" optname
+  do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        env=$OPTARG
+        ;;
+      "u")
+        userId=$OPTARG
+        ;;
+      "v")
+        debugFlag="-vvv"
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+  done
+
+### Main
+
+# Calculate run duration
+bash_start=$(date +%s)
+currentDate="$(date +%y%m%d_%H%M )"
+# standard logging
+updateLogFile="$PS_SCRIPT_BASE/logs/maint/update_f5_AppEnv_${app}${env}_$currentDate.log"
+util::setLogFile "$updateLogFile"
+util::log "DEBUG" "****Running $@"
+
+# verifiy required fields
+if [[ -z "$app" || -z "$env" ]]; then
+  util::log "ERROR" "App Code and Env Code is required."
+  usageInfo
+fi
+
+#### Update and check domain list
+echo
+util::log "INFO" "Re-syncing domain list..."
+$MAINT_HOME/syncDomainList -a $app -e $env
+util::log "INFO" "Sync Completed"
+echo
+
+###### Ansible processing
+# setup vault access (allows vault password to be sent from Rundeck)
+util::log "INFO" "Setting up vault access..."
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+# Setup log file for playbook, using same as this script
+export ANSIBLE_LOG_PATH=$updateLogFile
+
+# Export Env Variables for F5 provider access
+if [ -n "$RD_OPTION_F5PASSWORD" ]; then
+   # Passed in from Rundeck
+   export F5_PASSWORD="$RD_OPTION_F5PASSWORD"
+elif [ -n "$F5_PASSWORD" ]; then
+   # Passed in from Environment
+   echo ""
+else
+   #prompt for password
+   echo -n "Enter password for $userId:"
+   read -s userPass
+   echo
+   export F5_PASSWORD="$userPass"
+fi
+export F5_USER="$userId"
+
+# Run the ansible playbook with app/env as filters
+extraVars="filter_app=$app filter_env=$env"
+# Run playbook
+ansible::runPlaybook "$extraVars" "$debugFlag" "$playbookFile"
+
+### Addtional summary output
+bash_end=$(date +%s)
+runtime=$(python -c "print '%u:%02u' % ((${bash_end} - ${bash_start})/60, (${bash_end} - ${bash_start})%60)")
+util::log "INFO"  "F5 Virtual Server updated."
+util::log "INFO"  "Run Time: $runtime"
+
+sleep 1
+echo
+util::log "INFO" "Change Inventory:"
+changeList=$( grep -B 1 "changed:" $updateLogFile )
+util::log "INFO" "$changeList"
+echo
+
+util::log "INFO"  "Failed Tasks:"
+failList=$( grep -B 1 "fatal" $updateLogFile )
+if [ -z "$failList" ]; then
+   util::log "INFO" "   No Failed Tasks"
+else
+   util::log "ERROR" "   $failList"
+   exit 1
+fi
+
+# Completed F5 deployment

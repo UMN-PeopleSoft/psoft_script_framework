@@ -1,0 +1,136 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : postRefresh
+## Description : Run post refresh tasks, called from Rundeck
+## Author      : Nate Werner
+## Created     : 4/21/2020
+## Updated     :
+################################################################################
+## Syntax      : postRefresh -a <appCode> -e <TargetenvCode> [-s <SourceEnvCode>] [-v] [-h]
+## Parameters  : -a <app code>  : Filter by application
+##             : -e <target env>  : Target environment for refresh
+##             : -z             : Run Job async in background
+##             :
+## Example     : postRefresh -a cs -e qat
+##             : postRefresh -a cs -e per -s qat
+##
+################################################################################
+
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+# load needed libraries
+source $LIB_HOME/maint.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/inventory.sh
+
+# Script variables/defaults
+app=""
+targetEnv=""
+sourceEnv="prd"
+debugFlag="n"
+refreshPath="/psoft/admin/pssa_web/pssa/refresh"
+
+## common functions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  postRefresh -a <appCode> -e <TargetenvCode> [-v] [-h]"
+   echo "     Run the post refresh script to run AE jobs and start env"
+   echo "     This script will normally be called from Exadata post_clone_steps-env.sh"
+   echo " Parameters"
+   echo "     -a <app_code>    : (Required) Filter for an application (cs,fs,hr,ih)"
+   echo "     -e <target env>  : Target environment for refresh"
+   echo "                          (dmo,dmn,umn,dev,tst,qat,fix,per,trn,cls,upg,qrpt,rpt)"
+   echo "     -v               : Enable ansible debug/verbose mode."
+   echo "     -h               : Display this help"
+   echo
+   echo "Sample: postRefresh -a cs -e qat"
+   echo "        postRefresh -a cs -e per -s qat"
+
+   echo
+   exit
+
+}
+
+######## Main program
+
+# get user's parameters
+while getopts ":vhs:e:a:" optname; do
+    case "$optname" in
+      "a")
+        app=$OPTARG
+        ;;
+      "e")
+        targetEnv=$OPTARG
+        ;;
+      "v")
+        debugFlag="y"
+        export debugFlag
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+done
+
+### Main
+# verifiy required fields
+if [[ ( -z "$app" || -z "$targetEnv" ) ]]; then
+  echo "App and Env code is required."
+  usageInfo
+fi
+
+if [[ "$targetEnv" == "prd" ]]; then
+  echo "Cannot set target to PRD!"
+fi
+
+currentDate="$(date +%y%m%d_%H%M )"
+maintLogFile="${PS_SCRIPT_BASE}logs/maint/postRefresh_${app}${targetEnv}_$currentDate.log"
+util::log "DEBUG" "****Starting postRefresh for ${app}${targetEnv}"
+
+######
+
+# setup vault access
+export ANSIBLE_LOG_PATH=/dev/null
+sec::getandStoreVaultAccess
+if [[ $? -ne 0 ]]; then
+  util::log "ERROR" "Unable to setup vault access"
+  exit 1
+fi
+
+# Run Portal Sync
+util::runAE "$app" "$targetEnv" "PORTAL_CSS" "ONLINE"
+
+# Run VERSION
+util::runAE "$app" "$targetEnv" "VERSION" "ONLINE"
+
+# start domains with cache clear (-m)
+$PS_SCRIPT_BASE/maint/startAppEnv -a $app -e $targetEnv -m
+
+# Update Refresh status
+echo "" > $refreshPath/cs$targetEnv
+echo "" > $refreshPath/fs$targetEnv
+echo "" > $refreshPath/hr$targetEnv
+echo "" > $refreshPath/ih$targetEnv
+
+######
+
+util::log "DEBUG" "****Completed postRefresh for ${app}${targetEnv}"
+util::log "INFO" "Details of the postRefresh operation can be found in $maintLogFile"
+
+#END

@@ -1,0 +1,5 @@
+# Playbook to updating/creating F5 Virtual Server for Peoplesoft App Env
+- hosts: localhost
+  gather_facts: no
+  roles:
+    - f5lb

@@ -1,0 +1,134 @@
+#!/bin/env bash
+################################################################################
+##
+## File Name   : removeDomain
+## Description : Removed a web/app/sched domain, cleaning up any references for domain
+## Author      : Nate Werner
+## Created     : 11/1/2019
+##
+################################################################################
+##
+## Syntax      : removeDomain -d <name> [-n <serverName>] -h
+## Parameters  :   name = domain name to remove (unique for all domains except schedulers, see serverName)
+##             :   serverName = process scheduler server name, ie: PSUNX
+## Example     : removeDomain -d csdev1
+##
+################################################################################
+
+### Help Instructions
+function usageInfo()
+{
+   echo "Usage:"
+   echo "  removeDomain will remove a domain from Peoplesoft platform"
+   echo " Parameters"
+   echo "     -d <name>      : domain name (unique for all domains except schedulers, see serverName)"
+   echo "     -n <serverName>: (Optional) Name of scheduler, like PSUNX, if creating a Scheduler domain"
+   echo "     -t <tools_ver> : (optional) Major tools version of domain to remove"
+   echo "     -h             : Display this help"
+   echo
+   exit 1
+}
+
+commandParms="$@"
+# load bootstrap dynamic path
+currentPath="$( cd "$(dirname "$0")" && pwd )"
+source ${currentPath%${currentPath#*scripts*/}}library/bootstrap.sh
+
+source $LIB_HOME/inventory.sh
+source $LIB_HOME/utilities.sh
+source $LIB_HOME/security.sh
+source $LIB_HOME/ansible.sh
+
+##### Variable and defaults
+# Set in bootstrap:
+#   ANSIBLE_HOME
+#   DOMAIN_LIST
+#   MAINT_HOME
+#   SCRIPT_HOME
+
+debugFlag=""
+domainName=""
+serverName="NA"
+toolsVersion=""
+
+##### Prompt processing and validation
+while getopts "hd:n:t:" optname
+  do
+    case "$optname" in
+      "d")
+        domainName=$OPTARG
+        ;;
+      "n")
+        serverName=$OPTARG
+        ;;
+      "t")
+        toolsVersion=$OPTARG
+        ;;
+      "h")
+        usageInfo
+        ;;
+      "?")
+        echo "Unknown option $OPTARG"
+        usageInfo
+        ;;
+      ":")
+        echo "No argument value for option $OPTARG"
+        usageInfo
+        ;;
+      *)
+      # Should not occur
+        echo "Unknown error while processing options"
+        ;;
+    esac
+  done
+
+## Main
+
+# standard logging
+currentDate="$(date +%y%m%d_%H%M )"
+patchLogFile="$PS_SCRIPT_BASE/logs/maint/removeDomain_${domainName}${serverName}_$currentDate.log"
+util::setLogFile "$patchLogFile"
+util::log "DEBUG" "****Running $commandParms"
+
+# verifiy required fields
+if [[ -z "$domainName" ]]; then
+  util::log "ERROR" "Domain Name is required."
+  usageInfo
+fi
+
+if [ -z "$toolsVersion" ]; then
+  toolsVersion=$( inventory::getCurrentTools "$domainName")
+fi
+util::log "DEBUG" "updateDomain: Selected tools version: $toolsVersion"
+majorToolsVer="${toolsVersion:0:4}"
+
+inventory::getDomainInfo "$domainName" "$serverName" "$majorToolsVer" domAttribs
+if [[ "$?" -ne 0 ]]; then
+  util::log "ERROR" "Domain $domainName does not exist"
+  exit 1
+fi
+
+util::log "INFO" "Stopping domain $domainName..."
+## Stop Domain, force down, and stop Coherence
+stopDomain -d "$domainName" -n "$serverName" -t "$majorToolsVer" -c -z
+# Give some time to release resources
+sleep 1
+## Now Remove the domain config folder
+util::log "INFO" "Removing domain $domainName config home..."
+if [[ "${domAttribs[$DOM_ATTR_TYPE]}" == "web"]]
+  ssh ${domAttribs[$DOM_ATTR_HOST]} rm -rf /psoft/domains/$majorToolsVer/webserv/$domainName
+elif [[ "${domAttribs[$DOM_ATTR_TYPE]}" == "app"]]
+  ssh ${domAttribs[$DOM_ATTR_HOST]} rm -rf /psoft/domains/$majorToolsVer/${domAttribs[$DOM_ATTR_APP]}/appserv/$domainName
+else # Scheduler
+  ssh ${domAttribs[$DOM_ATTR_HOST]} rm -rf /psoft/domains/$majorToolsVer/${domAttribs[$DOM_ATTR_APP]}/appserv/prcs/$domainName
+fi
+
+## Remove from inventory
+util::log "INFO" "Removing domain $domainName from inventory"
+inventory::delDomain "$domainName" "$serverName" "$majorToolsVer"
+
+## Add any additional changes here
+
+util::log "INFO" "Removed domain $domainName"
+
+# Completed domain deployment

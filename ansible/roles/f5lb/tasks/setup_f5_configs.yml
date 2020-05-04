@@ -1,0 +1,24 @@
+---
+# tasks file for f5lb
+
+# common values needed for F5 setup
+
+- name: Setup config path
+  set_fact:
+      config_home: "{{ role_path }}/../../../config"
+      script_home: "{{ role_path }}/../../../scripts"
+
+# hr_host_url is used to support iRules that redirect IH requests to the HR app
+- name: Setup host URL
+  set_fact:
+      virt_host_url: "{{ filter_app| regex_replace('ih','ps') }}.{{ lookup('csvfile', filter_env + ' file=' + config_home + '/ps_web/web_auth_domain.csv delimiter=, default=' + filter_env + '.company.com' ) }}"
+      hr_host_url: "hr.{{ lookup('csvfile', filter_env + ' file=' + config_home + '/ps_web/web_auth_domain.csv delimiter=, default=' + filter_env + '.company.com' ) }}"
+
+- name: "Setup domain variables for env string representing non reporting envs."
+  set_fact:
+      webdomain_env_code: "{{ filter_env }}"
+      report_flag: "N"
+
+- name: "Check for alernate domain type for port #"
+  set_fact:
+      webdomain_alt_string: "{{ lookup('csvfile', filter_env + ' file=' + config_home + '/ps_web/alt_domain.csv delimiter=, default=') }}"
